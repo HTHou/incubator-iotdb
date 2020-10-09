@@ -60,15 +60,14 @@ public class FileLoaderManager {
   private File deviceOwnerTmpFile;
 
   private FileLoaderManager() {
-    File deviceOwnerMapDir = new File(IoTDBDescriptor.getInstance().getConfig().getSystemDir(),
-        SyncConstant.SYNC_NAME);
-    deviceOwnerFile = new File(deviceOwnerMapDir, SyncConstant.DEVICE_OWNER_FILE_NAME);
-    deviceOwnerTmpFile = new File(deviceOwnerMapDir, SyncConstant.DEVICE_OWNER_TMP_FILE_NAME);
+    String syncSystemDir = IoTDBDescriptor.getInstance().getConfig().getSyncDir();
+    deviceOwnerFile = new File(syncSystemDir, SyncConstant.DEVICE_OWNER_FILE_NAME);
+    deviceOwnerTmpFile = new File(syncSystemDir, SyncConstant.DEVICE_OWNER_TMP_FILE_NAME);
     try {
       recoverDeviceOwnerMap();
     } catch (IOException | ClassNotFoundException e) {
       LOGGER.error("Can not recover device owner map from file {}",
-          new File(deviceOwnerMapDir, SyncConstant.DEVICE_OWNER_FILE_NAME).getAbsolutePath());
+          new File(syncSystemDir, SyncConstant.DEVICE_OWNER_FILE_NAME).getAbsolutePath());
     }
   }
 
@@ -94,9 +93,9 @@ public class FileLoaderManager {
    */
   public synchronized void checkAndUpdateDeviceOwner(TsFileResource tsFileResource)
       throws SyncDeviceOwnerConflictException, IOException {
-    String curOwner = tsFileResource.getFile().getParentFile().getParentFile().getParentFile()
+    String curOwner = tsFileResource.getTsFile().getParentFile().getParentFile().getParentFile()
         .getName();
-    Set<String> deviceSet = tsFileResource.getStartTimeMap().keySet();
+    Set<String> deviceSet = tsFileResource.getDeviceToIndexMap().keySet();
     checkDeviceConflict(curOwner, deviceSet);
     updateDeviceOwner(curOwner, deviceSet);
   }
@@ -201,6 +200,7 @@ public class FileLoaderManager {
         totalWaitTime += WAIT_TIMEOUT;
       } catch (InterruptedException e) {
         LOGGER.error("Interrupted while waiting file load manager thread pool to exit. ", e);
+        Thread.currentThread().interrupt();
       }
     }
     loadTaskRunnerPool = null;

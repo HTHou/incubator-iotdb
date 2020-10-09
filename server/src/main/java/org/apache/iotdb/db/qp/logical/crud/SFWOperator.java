@@ -19,8 +19,8 @@
 package org.apache.iotdb.db.qp.logical.crud;
 
 import java.util.List;
+import org.apache.iotdb.db.metadata.PartialPath;
 import org.apache.iotdb.db.qp.logical.RootOperator;
-import org.apache.iotdb.tsfile.read.common.Path;
 
 /**
  * SFWOperator(select-from-where) includes four subclass: INSERT,DELETE,UPDATE,QUERY. All of these
@@ -32,6 +32,7 @@ public abstract class SFWOperator extends RootOperator {
   private FromOperator fromOperator;
   private FilterOperator filterOperator;
   private boolean hasAggregation = false;
+  private boolean lastQuery = false;
 
   public SFWOperator(int tokenIntType) {
     super(tokenIntType);
@@ -58,6 +59,9 @@ public abstract class SFWOperator extends RootOperator {
     if (!sel.getAggregations().isEmpty()) {
       hasAggregation = true;
     }
+    if (sel.isLastQuery()) {
+      lastQuery = true;
+    }
   }
 
   public FilterOperator getFilterOperator() {
@@ -73,8 +77,8 @@ public abstract class SFWOperator extends RootOperator {
    *
    * @return - a list of seriesPath
    */
-  public List<Path> getSelectedPaths() {
-    List<Path> suffixPaths = null;
+  public List<PartialPath> getSelectedPaths() {
+    List<PartialPath> suffixPaths = null;
     if (selectOperator != null) {
       suffixPaths = selectOperator.getSuffixPaths();
     }
@@ -83,5 +87,9 @@ public abstract class SFWOperator extends RootOperator {
 
   public boolean hasAggregation() {
     return hasAggregation;
+  }
+
+  public boolean isLastQuery() {
+    return lastQuery;
   }
 }

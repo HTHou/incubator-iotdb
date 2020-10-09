@@ -4,6 +4,9 @@
 **/lib/**
 **/data/**
 
+# Python runtime file
+**/__pycache__/**
+
 # Eclipse IDE files
 **/.classpath
 **/.project
@@ -80,3 +83,14 @@ tsfile/src/test/resources/*.ts
 local-snapshots-dir/
 venv/
 
+partitions.tmp
+partitions
+node_identifier
+
+# gitpod
+.theia/
+
+### Cmake files ###
+*.cmake
+Makefile
+**/CMakeFiles/

@@ -19,7 +19,7 @@
 package org.apache.iotdb.db.engine.flush;
 
 import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.ThreadPoolExecutor;
+import org.apache.iotdb.db.concurrent.WrappedRunnable;
 import org.apache.iotdb.db.engine.flush.pool.FlushSubTaskPoolManager;
 import org.apache.iotdb.db.engine.flush.pool.FlushTaskPoolManager;
 import org.apache.iotdb.db.engine.storagegroup.TsFileProcessor;
@@ -81,13 +81,17 @@ public class FlushManager implements FlushManagerMBean, IService {
     return FlushSubTaskPoolManager.getInstance().getWaitingTasksNumber();
   }
 
-  class FlushThread implements Runnable {
+  class FlushThread extends WrappedRunnable {
 
     @Override
-    public void run() {
+    public void runMayThrow() {
       TsFileProcessor tsFileProcessor = tsFileProcessorQueue.poll();
       tsFileProcessor.flushOneMemTable();
       tsFileProcessor.setManagedByFlushManager(false);
+      if (logger.isDebugEnabled()) {
+        logger.debug("Flush Thread re-register TSProcessor {} to the queue.",
+            tsFileProcessor.getTsFileResource().getTsFile().getAbsolutePath());
+      }
       registerTsFileProcessor(tsFileProcessor);
     }
   }
@@ -98,12 +102,29 @@ public class FlushManager implements FlushManagerMBean, IService {
   @SuppressWarnings("squid:S2445")
   public void registerTsFileProcessor(TsFileProcessor tsFileProcessor) {
     synchronized (tsFileProcessor) {
-      if (!tsFileProcessor.isManagedByFlushManager() && tsFileProcessor.getFlushingMemTableSize() > 0) {
-        logger.info("storage group {} begin to submit a flush thread, flushing memtable size: {}",
-            tsFileProcessor.getStorageGroupName(), tsFileProcessor.getFlushingMemTableSize());
+      if (!tsFileProcessor.isManagedByFlushManager()
+          && tsFileProcessor.getFlushingMemTableSize() > 0) {
         tsFileProcessorQueue.add(tsFileProcessor);
+        if (logger.isDebugEnabled()) {
+          logger.debug(
+              "{} begin to submit a flush thread, flushing memtable size: {}, queue size: {}",
+              tsFileProcessor.getTsFileResource().getTsFile().getAbsolutePath(),
+              tsFileProcessor.getFlushingMemTableSize(), tsFileProcessorQueue.size());
+        }
         tsFileProcessor.setManagedByFlushManager(true);
         flushPool.submit(new FlushThread());
+      } else if (logger.isDebugEnabled()) {
+        if (tsFileProcessor.isManagedByFlushManager()) {
+          logger.debug(
+              "{} is already in the flushPool, the first one: {}, the given processor flushMemtable number = {}",
+              tsFileProcessor.getTsFileResource().getTsFile().getAbsolutePath(),
+              tsFileProcessorQueue.isEmpty() ? "empty now"
+                  : tsFileProcessorQueue.getFirst().getStorageGroupName(),
+              tsFileProcessor.getFlushingMemTableSize());
+        } else {
+          logger.debug("No flushing memetable to do, register TsProcessor {} failed.",
+              tsFileProcessor.getTsFileResource().getTsFile().getAbsolutePath());
+        }
       }
     }
   }
@@ -121,5 +142,11 @@ public class FlushManager implements FlushManagerMBean, IService {
     }
 
     private static FlushManager instance = new FlushManager();
+  }
+
+  public String toString() {
+    return String.format("TSProcessors in the queue: %d, TaskPool size %d + %d,",
+        tsFileProcessorQueue.size(), flushPool.getWorkingTasksNumber(),
+        flushPool.getWaitingTasksNumber());
   }
 }

@@ -19,17 +19,27 @@
 package org.apache.iotdb.db.conf;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
 import java.time.ZoneId;
 import java.util.Properties;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
 import org.apache.iotdb.db.conf.directories.DirectoryManager;
+import org.apache.iotdb.db.engine.tsfilemanagement.TsFileManagementStrategy;
 import org.apache.iotdb.db.exception.query.QueryProcessException;
 import org.apache.iotdb.db.utils.FilePathUtils;
 import org.apache.iotdb.tsfile.common.conf.TSFileDescriptor;
+import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
+import org.apache.iotdb.tsfile.fileSystem.FSType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +47,7 @@ public class IoTDBDescriptor {
 
   private static final Logger logger = LoggerFactory.getLogger(IoTDBDescriptor.class);
   private IoTDBConfig conf = new IoTDBConfig();
+  private static CommandLine commandLine;
 
   private IoTDBDescriptor() {
     loadProps();
@@ -50,17 +61,49 @@ public class IoTDBDescriptor {
     return conf;
   }
 
-  private String getPropsUrl() {
-    String url = System.getProperty(IoTDBConstant.IOTDB_CONF, null);
-    if (url == null) {
-      url = System.getProperty(IoTDBConstant.IOTDB_HOME, null);
-      if (url != null) {
-        url = url + File.separatorChar + "conf" + File.separatorChar + IoTDBConfig.CONFIG_NAME;
+  public void replaceProps(String[] params) {
+    Options options = new Options();
+    final String RPC_PORT = "rpc_port";
+    Option rpcPort = new Option(RPC_PORT, RPC_PORT, true,
+        "The jdbc service listens on the port");
+    rpcPort.setRequired(false);
+    options.addOption(rpcPort);
+
+    boolean ok = parseCommandLine(options, params);
+    if (!ok) {
+      logger.error("replaces properties failed, use default conf params");
+    } else {
+      if (commandLine.hasOption(RPC_PORT)) {
+        conf.setRpcPort(Integer.parseInt(commandLine.getOptionValue(RPC_PORT)));
+        logger.debug("replace rpc port with={}", conf.getRpcPort());
+      }
+    }
+  }
+
+  private boolean parseCommandLine(Options options, String[] params) {
+    try {
+      CommandLineParser parser = new DefaultParser();
+      commandLine = parser.parse(options, params);
+    } catch (ParseException e) {
+      logger.error("parse conf params failed, {}", e.toString());
+      return false;
+    }
+    return true;
+  }
+
+  public URL getPropsUrl() {
+    // Check if a config-directory was specified first.
+    String urlString = System.getProperty(IoTDBConstant.IOTDB_CONF, null);
+    // If it wasn't, check if a home directory was provided (This usually contains a config)
+    if (urlString == null) {
+      urlString = System.getProperty(IoTDBConstant.IOTDB_HOME, null);
+      if (urlString != null) {
+        urlString = urlString + File.separatorChar + "conf" + File.separatorChar + IoTDBConfig.CONFIG_NAME;
       } else {
+        // If this too wasn't provided, try to find a default config in the root of the classpath.
         URL uri = IoTDBConfig.class.getResource("/" + IoTDBConfig.CONFIG_NAME);
         if (uri != null) {
-          url = uri.getPath();
-          return url;
+          return uri;
         }
         logger.warn(
             "Cannot find IOTDB_HOME or IOTDB_CONF environment variable when loading "
@@ -70,22 +113,37 @@ public class IoTDBDescriptor {
         conf.updatePath();
         return null;
       }
-    } else {
-      url += (File.separatorChar + IoTDBConfig.CONFIG_NAME);
     }
-    return url;
+    // If a config location was provided, but it doesn't end with a properties file,
+    // append the default location.
+    else if(!urlString.endsWith(".properties")) {
+      urlString += (File.separatorChar + IoTDBConfig.CONFIG_NAME);
+    }
+
+    // If the url doesn't start with "file:" or "classpath:", it's provided as a normal path.
+    // So we need to add it to make it a real URL.
+    if(!urlString.startsWith("file:") && !urlString.startsWith("classpath:")) {
+      urlString = "file:" + urlString;
+    }
+    try {
+      return new URL(urlString);
+    } catch (MalformedURLException e) {
+      return null;
+    }
   }
 
   /**
    * load an property file and set TsfileDBConfig variables.
    */
+  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
   private void loadProps() {
-    String url = getPropsUrl();
-    if (url == null) {
+    URL url = getPropsUrl();
+    if(url == null) {
+      logger.warn("Couldn't load the configuration from any of the known sources.");
       return;
     }
 
-    try (InputStream inputStream = new FileInputStream(new File(url))) {
+    try (InputStream inputStream = url.openStream()) {
 
       logger.info("Start to read config file {}", url);
       Properties properties = new Properties();
@@ -117,8 +175,16 @@ public class IoTDBDescriptor {
             + " use default value");
       }
 
+      conf.setEnableMetricService(Boolean.parseBoolean(properties
+          .getProperty("enable_metric_service", Boolean.toString(conf.isEnableMetricService()))));
+
       conf.setMetricsPort(Integer.parseInt(properties.getProperty("metrics_port",
           Integer.toString(conf.getMetricsPort()))));
+
+      conf.setQueryCacheSizeInMetric(Integer
+          .parseInt(properties.getProperty("query_cache_size_in_metric",
+              Integer.toString(conf.getQueryCacheSizeInMetric()))
+          ));
 
       conf.setRpcAddress(properties.getProperty("rpc_address", conf.getRpcAddress()));
 
@@ -140,22 +206,40 @@ public class IoTDBDescriptor {
           Boolean.parseBoolean(properties.getProperty("meta_data_cache_enable",
               Boolean.toString(conf.isMetaDataCacheEnable()))));
 
+      conf.setEnableLastCache(Boolean.parseBoolean(properties.getProperty("enable_last_cache",
+              Boolean.toString(conf.isLastCacheEnabled()))));
+
       initMemoryAllocate(properties);
 
       loadWALProps(properties);
 
-      conf.setBaseDir(properties.getProperty("base_dir", conf.getBaseDir()));
+      String systemDir = properties.getProperty("system_dir");
+      if (systemDir == null) {
+        systemDir = properties.getProperty("base_dir");
+        if (systemDir != null) {
+          systemDir = FilePathUtils.regularizePath(systemDir) + IoTDBConstant.SYSTEM_FOLDER_NAME;
+        } else {
+          systemDir = conf.getSystemDir();
+        }
+      }
+      conf.setSystemDir(systemDir);
 
-      conf.setSystemDir(FilePathUtils.regularizePath(conf.getBaseDir()) + "system");
+      conf.setSchemaDir(
+          FilePathUtils.regularizePath(conf.getSystemDir()) + IoTDBConstant.SCHEMA_FOLDER_NAME);
 
-      conf.setSchemaDir(FilePathUtils.regularizePath(conf.getSystemDir()) + "schema");
+      conf.setSyncDir(
+          FilePathUtils.regularizePath(conf.getSystemDir()) + IoTDBConstant.SYNC_FOLDER_NAME);
 
-      conf.setQueryDir(FilePathUtils.regularizePath(conf.getBaseDir()) + "query");
+      conf.setTracingDir(FilePathUtils
+          .regularizePath(conf.getSystemDir() + IoTDBConstant.TRACING_FOLDER_NAME));
+
+      conf.setQueryDir(
+          FilePathUtils.regularizePath(conf.getSystemDir()) + IoTDBConstant.QUERY_FOLDER_NAME);
 
       conf.setDataDirs(properties.getProperty("data_dirs", conf.getDataDirs()[0])
           .split(","));
 
-      conf.setWalFolder(properties.getProperty("wal_dir", conf.getWalFolder()));
+      conf.setWalDir(properties.getProperty("wal_dir", conf.getWalDir()));
 
       int walBufferSize = Integer.parseInt(properties.getProperty("wal_buffer_size",
           Integer.toString(conf.getWalBufferSize())));
@@ -172,7 +256,7 @@ public class IoTDBDescriptor {
       long tsfileSizeThreshold = Long.parseLong(properties
           .getProperty("tsfile_size_threshold",
               Long.toString(conf.getTsFileSizeThreshold())).trim());
-      if (tsfileSizeThreshold > 0) {
+      if (tsfileSizeThreshold >= 0) {
         conf.setTsFileSizeThreshold(tsfileSizeThreshold);
       }
 
@@ -182,6 +266,26 @@ public class IoTDBDescriptor {
       if (memTableSizeThreshold > 0) {
         conf.setMemtableSizeThreshold(memTableSizeThreshold);
       }
+
+      conf.setAvgSeriesPointNumberThreshold(Integer.parseInt(properties
+          .getProperty("avg_series_point_number_threshold",
+              Integer.toString(conf.getAvgSeriesPointNumberThreshold()))));
+
+      conf.setMergeChunkPointNumberThreshold(Integer.parseInt(properties
+          .getProperty("merge_chunk_point_number",
+              Integer.toString(conf.getMergeChunkPointNumberThreshold()))));
+
+      conf.setTsFileManagementStrategy(TsFileManagementStrategy.valueOf(properties
+          .getProperty("tsfile_manage_strategy",
+              conf.getTsFileManagementStrategy().toString())));
+
+      conf.setMaxLevelNum(Integer.parseInt(properties
+          .getProperty("max_level_num",
+              Integer.toString(conf.getMaxLevelNum()))));
+
+      conf.setMaxFileNumInEachLevel(Integer.parseInt(properties
+          .getProperty("max_file_num_in_each_level",
+              Integer.toString(conf.getMaxFileNumInEachLevel()))));
 
       conf.setSyncEnable(Boolean
           .parseBoolean(properties.getProperty("is_sync_enable",
@@ -201,9 +305,21 @@ public class IoTDBDescriptor {
         conf.setConcurrentFlushThread(Runtime.getRuntime().availableProcessors());
       }
 
+      conf.setConcurrentQueryThread(Integer
+          .parseInt(properties.getProperty("concurrent_query_thread",
+              Integer.toString(conf.getConcurrentQueryThread()))));
+
+      if (conf.getConcurrentQueryThread() <= 0) {
+        conf.setConcurrentQueryThread(Runtime.getRuntime().availableProcessors());
+      }
+
       conf.setmManagerCacheSize(Integer
-          .parseInt(properties.getProperty("schema_manager_cache_size",
+          .parseInt(properties.getProperty("metadata_node_cache_size",
               Integer.toString(conf.getmManagerCacheSize())).trim()));
+
+      conf.setmRemoteSchemaCacheSize(Integer
+          .parseInt(properties.getProperty("remote_schema_cache_size",
+              Integer.toString(conf.getmRemoteSchemaCacheSize())).trim()));
 
       conf.setLanguageVersion(properties.getProperty("language_version",
           conf.getLanguageVersion()).trim());
@@ -242,9 +358,23 @@ public class IoTDBDescriptor {
       conf.setChunkMergePointThreshold(Integer.parseInt(properties.getProperty(
           "chunk_merge_point_threshold", Integer.toString(conf.getChunkMergePointThreshold()))));
 
+      conf.setEnablePartialInsert(
+          Boolean.parseBoolean(properties.getProperty("enable_partial_insert",
+              String.valueOf(conf.isEnablePartialInsert()))));
+
+      conf.setMtreeSnapshotInterval(Integer.parseInt(properties.getProperty(
+          "mtree_snapshot_interval", Integer.toString(conf.getMtreeSnapshotInterval()))));
+      conf.setMtreeSnapshotThresholdTime(Integer.parseInt(properties.getProperty(
+          "mtree_snapshot_threshold_time",
+          Integer.toString(conf.getMtreeSnapshotThresholdTime()))));
+
       conf.setEnablePerformanceStat(Boolean
           .parseBoolean(properties.getProperty("enable_performance_stat",
               Boolean.toString(conf.isEnablePerformanceStat())).trim()));
+
+      conf.setEnablePerformanceTracing(Boolean
+          .parseBoolean(properties.getProperty("enable_performance_tracing",
+              Boolean.toString(conf.isEnablePerformanceTracing())).trim()));
 
       conf.setPerformanceStatDisplayInterval(Long
           .parseLong(properties.getProperty("performance_stat_display_interval",
@@ -283,7 +413,8 @@ public class IoTDBDescriptor {
       conf.setHdfsPort(properties.getProperty("hdfs_port", conf.getHdfsPort()));
       conf.setDfsNameServices(
           properties.getProperty("dfs_nameservices", conf.getDfsNameServices()));
-      conf.setDfsHaNamenodes(properties.getProperty("dfs_ha_namenodes", conf.getRawDfsHaNamenodes()).split(","));
+      conf.setDfsHaNamenodes(
+          properties.getProperty("dfs_ha_namenodes", conf.getRawDfsHaNamenodes()).split(","));
       conf.setDfsHaAutomaticFailoverEnabled(
           Boolean.parseBoolean(properties.getProperty("dfs_ha_automatic_failover_enabled",
               String.valueOf(conf.isDfsHaAutomaticFailoverEnabled()))));
@@ -300,31 +431,91 @@ public class IoTDBDescriptor {
       conf.setDefaultTTL(Long.parseLong(properties.getProperty("default_ttl",
           String.valueOf(conf.getDefaultTTL()))));
 
+//      conf.setEnablePartition(Boolean.parseBoolean(
+//          properties.getProperty("enable_partition", String.valueOf(conf.isEnablePartition()))));
+
+      // Time range for dividing storage group
+//      conf.setPartitionInterval(Long.parseLong(properties
+//              .getProperty("partition_interval", String.valueOf(conf.getPartitionInterval()))));
+
+      // the num of memtables in each storage group
+//      conf.setConcurrentWritingTimePartition(
+//          Integer.parseInt(properties.getProperty("concurrent_writing_time_partition",
+//              String.valueOf(conf.getConcurrentWritingTimePartition()))));
+
+      // the default fill interval in LinearFill and PreviousFill
+      conf.setDefaultFillInterval(
+          Integer.parseInt(properties.getProperty("default_fill_interval",
+              String.valueOf(conf.getDefaultFillInterval()))));
+
+      conf.setTagAttributeTotalSize(
+          Integer.parseInt(properties.getProperty("tag_attribute_total_size",
+              String.valueOf(conf.getTagAttributeTotalSize())))
+      );
+      conf.setPrimitiveArraySize((Integer.parseInt(
+          properties.getProperty(
+              "primitive_array_size", String.valueOf(conf.getPrimitiveArraySize())))));
+
+      // mqtt
+      if (properties.getProperty(IoTDBConstant.MQTT_HOST_NAME) != null) {
+        conf.setMqttHost(properties.getProperty(IoTDBConstant.MQTT_HOST_NAME));
+      }
+      if (properties.getProperty(IoTDBConstant.MQTT_PORT_NAME) != null) {
+        conf.setMqttPort(Integer.parseInt(properties.getProperty(IoTDBConstant.MQTT_PORT_NAME)));
+      }
+      if (properties.getProperty(IoTDBConstant.MQTT_HANDLER_POOL_SIZE_NAME) != null) {
+        conf.setMqttHandlerPoolSize(
+            Integer.parseInt(properties.getProperty(IoTDBConstant.MQTT_HANDLER_POOL_SIZE_NAME)));
+      }
+      if (properties.getProperty(IoTDBConstant.MQTT_PAYLOAD_FORMATTER_NAME) != null) {
+        conf.setMqttPayloadFormatter(
+            properties.getProperty(IoTDBConstant.MQTT_PAYLOAD_FORMATTER_NAME));
+      }
+      if (properties.getProperty(IoTDBConstant.ENABLE_MQTT) != null) {
+        conf.setEnableMQTTService(
+            Boolean.parseBoolean(properties.getProperty(IoTDBConstant.ENABLE_MQTT)));
+      }
+      if (properties.getProperty(IoTDBConstant.MQTT_MAX_MESSAGE_SIZE) != null) {
+        conf.setMqttMaxMessageSize(
+            Integer.parseInt(properties.getProperty(IoTDBConstant.MQTT_MAX_MESSAGE_SIZE)));
+      }
+
+      conf.setAuthorizerProvider(properties.getProperty("authorizer_provider_class",
+          "org.apache.iotdb.db.auth.authorizer.LocalFileAuthorizer"));
+      //if using org.apache.iotdb.db.auth.authorizer.OpenIdAuthorizer, openID_url is needed.
+      conf.setOpenIdProviderUrl(properties.getProperty("openID_url", ""));
+
       // At the same time, set TSFileConfig
       TSFileDescriptor.getInstance().getConfig()
-          .setTSFileStorageFs(properties.getProperty("tsfile_storage_fs", conf.getTsFileStorageFs().name()));
-      TSFileDescriptor.getInstance().getConfig().setKerberosKeytabFilePath(
+          .setTSFileStorageFs(FSType.valueOf(
+              properties.getProperty("tsfile_storage_fs", conf.getTsFileStorageFs().name())));
+      TSFileDescriptor.getInstance().getConfig().setCoreSitePath(
           properties.getProperty("core_site_path", conf.getCoreSitePath()));
-      TSFileDescriptor.getInstance().getConfig().setKerberosPrincipal(
+      TSFileDescriptor.getInstance().getConfig().setHdfsSitePath(
           properties.getProperty("hdfs_site_path", conf.getHdfsSitePath()));
       TSFileDescriptor.getInstance().getConfig()
           .setHdfsIp(properties.getProperty("hdfs_ip", conf.getRawHDFSIp()).split(","));
-      TSFileDescriptor.getInstance().getConfig().setHdfsPort(properties.getProperty("hdfs_port", conf.getHdfsPort()));
       TSFileDescriptor.getInstance().getConfig()
-          .setDfsNameServices(properties.getProperty("dfs_nameservices", conf.getDfsNameServices()));
+          .setHdfsPort(properties.getProperty("hdfs_port", conf.getHdfsPort()));
       TSFileDescriptor.getInstance().getConfig()
-          .setDfsHaNamenodes(properties.getProperty("dfs_ha_namenodes", conf.getRawDfsHaNamenodes()).split(","));
+          .setDfsNameServices(
+              properties.getProperty("dfs_nameservices", conf.getDfsNameServices()));
+      TSFileDescriptor.getInstance().getConfig()
+          .setDfsHaNamenodes(
+              properties.getProperty("dfs_ha_namenodes", conf.getRawDfsHaNamenodes()).split(","));
       TSFileDescriptor.getInstance().getConfig().setDfsHaAutomaticFailoverEnabled(
-          Boolean.parseBoolean(properties.getProperty("dfs_ha_automatic_failover_enabled", String.valueOf(conf.isDfsHaAutomaticFailoverEnabled()))));
+          Boolean.parseBoolean(properties.getProperty("dfs_ha_automatic_failover_enabled",
+              String.valueOf(conf.isDfsHaAutomaticFailoverEnabled()))));
       TSFileDescriptor.getInstance().getConfig().setDfsClientFailoverProxyProvider(
-          properties.getProperty("dfs_client_failover_proxy_provider", conf.getDfsClientFailoverProxyProvider()));
+          properties.getProperty("dfs_client_failover_proxy_provider",
+              conf.getDfsClientFailoverProxyProvider()));
       TSFileDescriptor.getInstance().getConfig().setUseKerberos(Boolean.parseBoolean(
           properties.getProperty("hdfs_use_kerberos", String.valueOf(conf.isUseKerberos()))));
       TSFileDescriptor.getInstance().getConfig().setKerberosKeytabFilePath(
           properties.getProperty("kerberos_keytab_file_path", conf.getKerberosKeytabFilePath()));
       TSFileDescriptor.getInstance().getConfig().setKerberosPrincipal(
           properties.getProperty("kerberos_principal", conf.getKerberosPrincipal()));
-
+      TSFileDescriptor.getInstance().getConfig().setBatchSize(conf.getBatchSize());
       // set tsfile-format config
       loadTsFileProps(properties);
 
@@ -340,7 +531,7 @@ public class IoTDBDescriptor {
     }
   }
 
-  private void loadWALProps(Properties properties){
+  private void loadWALProps(Properties properties) {
     conf.setEnableWal(Boolean.parseBoolean(properties.getProperty("enable_wal",
         Boolean.toString(conf.isEnableWal()))));
 
@@ -352,12 +543,27 @@ public class IoTDBDescriptor {
         .parseLong(properties.getProperty("force_wal_period_in_ms",
             Long.toString(conf.getForceWalPeriodInMs()))));
 
+    conf.setEnableDiscardOutOfOrderData(Boolean.parseBoolean(
+        properties.getProperty("enable_discard_out_of_order_data",
+        Boolean.toString(conf.isEnableDiscardOutOfOrderData()))));
+
   }
 
-  private void loadAutoCreateSchemaProps(Properties properties){
+  private void loadAutoCreateSchemaProps(Properties properties) {
     conf.setAutoCreateSchemaEnabled(
         Boolean.parseBoolean(properties.getProperty("enable_auto_create_schema",
             Boolean.toString(conf.isAutoCreateSchemaEnabled()).trim())));
+    conf.setBooleanStringInferType(
+        TSDataType.valueOf(properties.getProperty("boolean_string_infer_type",
+            conf.getBooleanStringInferType().toString())));
+    conf.setIntegerStringInferType(
+        TSDataType.valueOf(properties.getProperty("integer_string_infer_type",
+            conf.getIntegerStringInferType().toString())));
+    conf.setFloatingStringInferType(
+        TSDataType.valueOf(properties.getProperty("floating_string_infer_type",
+            conf.getFloatingStringInferType().toString())));
+    conf.setNanStringInferType(TSDataType.valueOf(properties.getProperty("nan_string_infer_type",
+        conf.getNanStringInferType().toString())));
     conf.setDefaultStorageGroupLevel(
         Integer.parseInt(properties.getProperty("default_storage_group_level",
             Integer.toString(conf.getDefaultStorageGroupLevel()))));
@@ -381,7 +587,7 @@ public class IoTDBDescriptor {
             conf.getDefaultTextEncoding().toString()));
   }
 
-  private void loadTsFileProps(Properties properties){
+  private void loadTsFileProps(Properties properties) {
     TSFileDescriptor.getInstance().getConfig().setGroupSizeInByte(Integer
         .parseInt(properties.getProperty("group_size_in_byte",
             Integer.toString(TSFileDescriptor.getInstance().getConfig().getGroupSizeInByte()))));
@@ -420,23 +626,19 @@ public class IoTDBDescriptor {
         .getProperty("value_encoder",
             TSFileDescriptor.getInstance().getConfig().getValueEncoder()));
     TSFileDescriptor.getInstance().getConfig().setCompressor(properties
-        .getProperty("compressor", TSFileDescriptor.getInstance().getConfig().getCompressor()));
+        .getProperty("compressor",
+            TSFileDescriptor.getInstance().getConfig().getCompressor().toString()));
+    TSFileDescriptor.getInstance().getConfig().setMaxDegreeOfIndexNode(Integer.parseInt(properties
+        .getProperty("max_degree_of_index_node", Integer
+            .toString(TSFileDescriptor.getInstance().getConfig().getMaxDegreeOfIndexNode()))));
   }
 
-  public void loadHotModifiedProps() throws QueryProcessException {
-    String url = getPropsUrl();
-    if (url == null) {
-      return;
-    }
-
-    try (InputStream inputStream = new FileInputStream(new File(url))) {
-      logger.info("Start to reload config file {}", url);
-      Properties properties = new Properties();
-      properties.load(inputStream);
-
+  public void loadHotModifiedProps(Properties properties)
+      throws QueryProcessException {
+    try {
       // update data dirs
       String dataDirs = properties.getProperty("data_dirs", null);
-      if(dataDirs != null){
+      if (dataDirs != null) {
         conf.reloadDataDirs(dataDirs.split(","));
       }
 
@@ -459,7 +661,7 @@ public class IoTDBDescriptor {
       long tsfileSizeThreshold = Long.parseLong(properties
           .getProperty("tsfile_size_threshold",
               Long.toString(conf.getTsFileSizeThreshold())).trim());
-      if (tsfileSizeThreshold > 0 && !conf.isEnableParameterAdapter()) {
+      if (tsfileSizeThreshold >= 0 && !conf.isEnableParameterAdapter()) {
         conf.setTsFileSizeThreshold(tsfileSizeThreshold);
       }
 
@@ -477,8 +679,27 @@ public class IoTDBDescriptor {
       loadTsFileProps(properties);
 
     } catch (Exception e) {
+      throw new QueryProcessException(
+          String.format("Fail to reload configuration because %s", e));
+    }
+  }
+
+  public void loadHotModifiedProps() throws QueryProcessException {
+    URL url = getPropsUrl();
+    if(url == null) {
+      logger.warn("Couldn't load the configuration from any of the known sources.");
+      return;
+    }
+
+    try (InputStream inputStream = url.openStream()) {
+      logger.info("Start to reload config file {}", url);
+      Properties properties = new Properties();
+      properties.load(inputStream);
+      loadHotModifiedProps(properties);
+    } catch (Exception e) {
       logger.warn("Fail to reload config file {}", url, e);
-      throw new QueryProcessException(String.format("Fail to reload config file %s because %s", url, e.getMessage()));
+      throw new QueryProcessException(
+          String.format("Fail to reload config file %s because %s", url, e.getMessage()));
     }
   }
 
@@ -491,18 +712,23 @@ public class IoTDBDescriptor {
         proportionSum += Integer.parseInt(proportion.trim());
       }
       long maxMemoryAvailable = Runtime.getRuntime().maxMemory();
-      conf.setAllocateMemoryForWrite(
-          maxMemoryAvailable * Integer.parseInt(proportions[0].trim()) / proportionSum);
-      conf.setAllocateMemoryForRead(
-          maxMemoryAvailable * Integer.parseInt(proportions[1].trim()) / proportionSum);
+      if (proportionSum != 0) {
+        conf.setAllocateMemoryForWrite(
+                maxMemoryAvailable * Integer.parseInt(proportions[0].trim()) / proportionSum);
+        conf.setAllocateMemoryForRead(
+                maxMemoryAvailable * Integer.parseInt(proportions[1].trim()) / proportionSum);
+      }
     }
+
+    logger.info("allocateMemoryForRead = " + conf.getAllocateMemoryForRead());
+    logger.info("allocateMemoryForWrite = " + conf.getAllocateMemoryForWrite());
 
     if (!conf.isMetaDataCacheEnable()) {
       return;
     }
 
     String queryMemoryAllocateProportion = properties
-        .getProperty("filemeta_chunkmeta_free_memory_proportion");
+        .getProperty("chunkmeta_chunk_timeseriesmeta_free_memory_proportion");
     if (queryMemoryAllocateProportion != null) {
       String[] proportions = queryMemoryAllocateProportion.split(":");
       int proportionSum = 0;
@@ -510,15 +736,20 @@ public class IoTDBDescriptor {
         proportionSum += Integer.parseInt(proportion.trim());
       }
       long maxMemoryAvailable = conf.getAllocateMemoryForRead();
-      try {
-        conf.setAllocateMemoryForFileMetaDataCache(
-            maxMemoryAvailable * Integer.parseInt(proportions[0].trim()) / proportionSum);
-        conf.setAllocateMemoryForChumkMetaDataCache(
-            maxMemoryAvailable * Integer.parseInt(proportions[1].trim()) / proportionSum);
-      } catch (Exception e) {
-        throw new RuntimeException(
-            "Each subsection of configuration item filemeta_chunkmeta_free_memory_proportion should be an integer, which is "
-                + queryMemoryAllocateProportion);
+      if (proportionSum != 0) {
+        try {
+          conf.setAllocateMemoryForChunkMetaDataCache(
+                  maxMemoryAvailable * Integer.parseInt(proportions[0].trim()) / proportionSum);
+          conf.setAllocateMemoryForChunkCache(
+                  maxMemoryAvailable * Integer.parseInt(proportions[1].trim()) / proportionSum);
+          conf.setAllocateMemoryForTimeSeriesMetaDataCache(
+                  maxMemoryAvailable * Integer.parseInt(proportions[2].trim()) / proportionSum);
+        } catch (Exception e) {
+          throw new RuntimeException(
+                  "Each subsection of configuration item chunkmeta_chunk_timeseriesmeta_free_memory_proportion"
+                          + " should be an integer, which is "
+                          + queryMemoryAllocateProportion);
+        }
       }
 
     }

@@ -18,14 +18,11 @@
  */
 package org.apache.iotdb.db.query.control;
 
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import org.apache.iotdb.db.engine.storagegroup.TsFileResource;
 import org.apache.iotdb.db.engine.querycontext.QueryDataSource;
+import org.apache.iotdb.db.engine.storagegroup.TsFileResource;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * <p>
@@ -77,8 +74,10 @@ public class QueryFileManager {
       // this file may be deleted just before we lock it
       if (tsFileResource.isDeleted()) {
         Map<Long, Set<TsFileResource>> pathMap = !isClosed ? unsealedFilePathsMap : sealedFilePathsMap;
-        pathMap.get(queryId).remove(tsFileResource);
-        FileReaderManager.getInstance().decreaseFileReaderReference(tsFileResource, isClosed);
+        // This resource may be removed by other threads of this query.
+        if (pathMap.get(queryId).remove(tsFileResource)) {
+          FileReaderManager.getInstance().decreaseFileReaderReference(tsFileResource, isClosed);
+        }
         iterator.remove();
       }
     }
@@ -112,8 +111,7 @@ public class QueryFileManager {
    * must not return null.
    */
   void addFilePathToMap(long queryId, TsFileResource tsFile, boolean isClosed) {
-    Map<Long, Set<TsFileResource>> pathMap = isClosed ? unsealedFilePathsMap :
-        sealedFilePathsMap;
+    Map<Long, Set<TsFileResource>> pathMap = isClosed ? sealedFilePathsMap : unsealedFilePathsMap;
     //TODO this is not an atomic operation, is there concurrent problem?
     if (!pathMap.get(queryId).contains(tsFile)) {
       pathMap.get(queryId).add(tsFile);

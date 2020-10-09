@@ -18,1078 +18,180 @@
  */
 package org.apache.iotdb.db.metadata;
 
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONObject;
-import com.alibaba.fastjson.serializer.SerializerFeature;
+import static java.util.stream.Collectors.toList;
+import static org.apache.iotdb.db.conf.IoTDBConstant.PATH_SEPARATOR;
+import static org.apache.iotdb.db.conf.IoTDBConstant.PATH_WILDCARD;
+import static org.apache.iotdb.db.query.executor.LastQueryExecutor.calculateLastPairForOneSeriesLocally;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.io.Serializable;
-import java.sql.SQLException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Queue;
 import java.util.Set;
-import java.util.Stack;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+import org.apache.iotdb.db.conf.IoTDBConfig;
+import org.apache.iotdb.db.conf.IoTDBConstant;
 import org.apache.iotdb.db.conf.IoTDBDescriptor;
-import org.apache.iotdb.db.exception.path.MTreePathException;
-import org.apache.iotdb.db.exception.path.PathException;
-import org.apache.iotdb.db.exception.storageGroup.StorageGroupException;
-import org.apache.iotdb.db.exception.storageGroup.StorageGroupNotSetException;
-import org.apache.iotdb.db.exception.storageGroup.StorageGroupPathException;
-import org.apache.iotdb.db.qp.constant.SQLConstant;
-import org.apache.iotdb.tsfile.common.constant.TsFileConstant;
+import org.apache.iotdb.db.engine.fileSystem.SystemFileFactory;
+import org.apache.iotdb.db.exception.metadata.AliasAlreadyExistException;
+import org.apache.iotdb.db.exception.metadata.IllegalPathException;
+import org.apache.iotdb.db.exception.metadata.MetadataException;
+import org.apache.iotdb.db.exception.metadata.PathAlreadyExistException;
+import org.apache.iotdb.db.exception.metadata.PathNotExistException;
+import org.apache.iotdb.db.exception.metadata.StorageGroupAlreadySetException;
+import org.apache.iotdb.db.exception.metadata.StorageGroupNotSetException;
+import org.apache.iotdb.db.metadata.MManager.StorageGroupFilter;
+import org.apache.iotdb.db.metadata.mnode.MNode;
+import org.apache.iotdb.db.metadata.mnode.MeasurementMNode;
+import org.apache.iotdb.db.metadata.mnode.StorageGroupMNode;
+import org.apache.iotdb.db.qp.physical.sys.ShowTimeSeriesPlan;
+import org.apache.iotdb.db.query.context.QueryContext;
+import org.apache.iotdb.db.utils.TestOnly;
 import org.apache.iotdb.tsfile.file.metadata.enums.CompressionType;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSEncoding;
+import org.apache.iotdb.tsfile.read.TimeValuePair;
+import org.apache.iotdb.tsfile.utils.Pair;
 import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The hierarchical struct of the Metadata Tree is implemented in this class.
  */
 public class MTree implements Serializable {
 
+  public static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
   private static final long serialVersionUID = -4200394435237291964L;
-  private static final String PATH_SEPARATOR = "\\.";
-  private static final String NO_CHILD_ERROR = "Node [%s] doesn't have child named: [%s]";
-  private static final String NOT_LEAF_NODE = "is NOT the leaf node";
+  private static final Logger logger = LoggerFactory.getLogger(MTree.class);
+  private static transient ThreadLocal<Integer> limit = new ThreadLocal<>();
+  private static transient ThreadLocal<Integer> offset = new ThreadLocal<>();
+  private static transient ThreadLocal<Integer> count = new ThreadLocal<>();
+  private static transient ThreadLocal<Integer> curOffset = new ThreadLocal<>();
   private MNode root;
 
-  MTree(String rootName) {
-    this.root = new MNode(rootName, null, false);
+  MTree() {
+    this.root = new MNode(null, IoTDBConstant.PATH_ROOT);
   }
 
-  /**
-   * function for adding timeseries.It should check whether seriesPath exists.
-   */
-  void addTimeseriesPath(String timeseriesPath, TSDataType dataType, TSEncoding encoding,
-      CompressionType compressor, Map<String, String> props) throws PathException {
-    String[] nodeNames = MetaUtils.getNodeNames(timeseriesPath, PATH_SEPARATOR);
-    if (nodeNames.length <= 1 || !nodeNames[0].equals(root.getName())) {
-      throw new MTreePathException("Timeseries", timeseriesPath);
-    }
-    MNode cur = findLeafParent(nodeNames);
-    String levelPath = cur.getDataFileName();
-
-    MNode leaf = new MNode(nodeNames[nodeNames.length - 1], cur, dataType, encoding, compressor);
-    if (props != null && !props.isEmpty()) {
-      leaf.getSchema().setProps(props);
-    }
-    leaf.setDataFileName(levelPath);
-    if (cur.isLeaf()) {
-      throw new MTreePathException(timeseriesPath, "can't be created",
-          String.format("node [%s] is left node", cur.getName()));
-    }
-    cur.addChild(nodeNames[nodeNames.length - 1], leaf);
+  private MTree(MNode root) {
+    this.root = root;
   }
 
-  /**
-   * function for adding deviceId
-   */
-  MNode addDeviceId(String deviceId) throws PathException {
-    String[] nodeNames = MetaUtils.getNodeNames(deviceId, PATH_SEPARATOR);
-    if (nodeNames.length <= 1 || !nodeNames[0].equals(root.getName())) {
-      throw new MTreePathException("Timeseries", deviceId);
-    }
-    MNode cur = getRoot();
-    for (int i = 1; i < nodeNames.length; i++) {
-      if (!cur.hasChild(nodeNames[i])) {
-        cur.addChild(nodeNames[i], new MNode(nodeNames[i], cur, false));
+  static long getLastTimeStamp(MeasurementMNode node, QueryContext queryContext) {
+    TimeValuePair last = node.getCachedLast();
+    if (last != null) {
+      return node.getCachedLast().getTimestamp();
+    } else {
+      try {
+        last = calculateLastPairForOneSeriesLocally(node.getPartialPath(),
+            node.getSchema().getType(), queryContext, Collections.emptySet());
+        return last.getTimestamp();
+      } catch (Exception e) {
+        logger.error("Something wrong happened while trying to get last time value pair of {}",
+            node.getFullPath(), e);
+        return Long.MIN_VALUE;
       }
-      cur = cur.getChild(nodeNames[i]);
     }
-    return cur;
   }
 
-  private MNode findLeafParent(String[] nodeNames) throws PathException {
-    MNode cur = root;
-    String levelPath = null;
-    int i = 1;
-    while (i < nodeNames.length - 1) {
-      String nodeName = nodeNames[i];
-      if (cur.isStorageGroup()) {
-        levelPath = cur.getDataFileName();
-      }
-      if (!cur.hasChild(nodeName)) {
-        if (cur.isLeaf()) {
-          throw new MTreePathException(String.join(",", nodeNames), "can't be created",
-              String.format("node [%s] is left node", cur.getName()));
-        }
-        cur.addChild(nodeName, new MNode(nodeName, cur, false));
-      }
-      cur.setDataFileName(levelPath);
-      cur = cur.getChild(nodeName);
-      if (levelPath == null) {
-        levelPath = cur.getDataFileName();
-      }
-      i++;
-    }
-    cur.setDataFileName(levelPath);
-    return cur;
-  }
+  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
+  public static MTree deserializeFrom(File mtreeSnapshot) {
+    try (BufferedReader br = new BufferedReader(new FileReader(mtreeSnapshot))) {
+      String s;
+      Deque<MNode> nodeStack = new ArrayDeque<>();
+      MNode node = null;
 
-
-  /**
-   * function for checking whether the given path exists.
-   *
-   * @param path -seriesPath not necessarily the whole seriesPath (possibly a prefix of a sequence)
-   */
-  boolean isPathExist(String path) {
-    String[] nodeNames = nodeNames = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = root;
-    int i = 0;
-    while (i < nodeNames.length - 1) {
-      String nodeName = nodeNames[i];
-      if (cur.getName().equals(nodeName)) {
-        i++;
-        nodeName = nodeNames[i];
-        if (cur.hasChild(nodeName)) {
-          cur = cur.getChild(nodeName);
+      while ((s = br.readLine()) != null) {
+        String[] nodeInfo = s.split(",");
+        short nodeType = Short.parseShort(nodeInfo[0]);
+        if (nodeType == MetadataConstant.STORAGE_GROUP_MNODE_TYPE) {
+          node = StorageGroupMNode.deserializeFrom(nodeInfo);
+        } else if (nodeType == MetadataConstant.MEASUREMENT_MNODE_TYPE) {
+          node = MeasurementMNode.deserializeFrom(nodeInfo);
         } else {
-          return false;
+          node = new MNode(null, nodeInfo[1]);
         }
-      } else {
-        return false;
-      }
-    }
-    return cur.getName().equals(nodeNames[i]);
-  }
 
-  /**
-   * function for checking whether the given path exists under the given mNode.
-   */
-  boolean isPathExist(MNode node, String path) {
-    String[] nodeNames = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodeNames.length < 1) {
-      return true;
-    }
-    if (!node.hasChild(nodeNames[0])) {
-      return false;
-    }
-    MNode cur = node.getChild(nodeNames[0]);
-
-    int i = 0;
-    while (i < nodeNames.length - 1) {
-      String nodeName = nodeNames[i];
-      if (cur.getName().equals(nodeName)) {
-        i++;
-        nodeName = nodeNames[i];
-        if (cur.hasChild(nodeName)) {
-          cur = cur.getChild(nodeName);
+        int childrenSize = Integer.parseInt(nodeInfo[nodeInfo.length - 1]);
+        if (childrenSize == 0) {
+          nodeStack.push(node);
         } else {
-          return false;
-        }
-      } else {
-        return false;
-      }
-    }
-    return cur.getName().equals(nodeNames[i]);
-  }
-
-  /**
-   * make sure check seriesPath before setting storage group.
-   */
-  public void setStorageGroup(String path) throws StorageGroupException {
-    String[] nodeNames = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = root;
-    if (nodeNames.length <= 1 || !nodeNames[0].equals(root.getName())) {
-      throw new StorageGroupException(
-          String.format("The storage group can't be set to [%s] node", path));
-    }
-    int i = 1;
-    while (i < nodeNames.length - 1) {
-      MNode temp = cur.getChild(nodeNames[i]);
-      if (temp == null) {
-        // add one child node
-        cur.addChild(nodeNames[i], new MNode(nodeNames[i], cur, false));
-      } else if (temp.isStorageGroup()) {
-        // before set storage group should check the seriesPath exist or not
-        // throw exception
-        throw new StorageGroupException(
-            String.format("The prefix of [%s] has been set to the storage group.", path));
-      }
-      cur = cur.getChild(nodeNames[i]);
-      i++;
-    }
-    MNode temp = cur.getChild(nodeNames[i]);
-    if (temp == null) {
-      cur.addChild(nodeNames[i], new MNode(nodeNames[i], cur, false));
-    } else {
-      throw new StorageGroupException(String
-          .format("The seriesPath of [%s] already exist, it can't be set to the storage group",
-              path));
-    }
-    cur = cur.getChild(nodeNames[i]);
-    cur.setDataTTL(IoTDBDescriptor.getInstance().getConfig().getDefaultTTL());
-    cur.setStorageGroup(true);
-
-    setStorageGroup(path, cur);
-  }
-
-  void deleteStorageGroup(String path) throws PathException {
-    MNode cur = getNode(path);
-    if (!cur.isStorageGroup()) {
-      throw new MTreePathException(
-          String.format("The path [%s] is not a deletable storage group", path));
-    }
-    cur.getParent().deleteChild(cur.getName());
-    cur = cur.getParent();
-    while (cur != null && !MetadataConstant.ROOT.equals(cur.getName())
-        && cur.getChildren().size() == 0) {
-      cur.getParent().deleteChild(cur.getName());
-      cur = cur.getParent();
-    }
-  }
-
-  /**
-   * Check whether the input path is storage group or not
-   *
-   * @param path input path
-   * @return if the whole path is a storage group, return true. Else return false
-   * @apiNote :for cluster
-   */
-  boolean checkStorageGroup(String path) {
-    String[] nodeNames = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = root;
-    if (nodeNames.length <= 1 || !nodeNames[0].equals(root.getName())) {
-      return false;
-    }
-    int i = 1;
-    while (i < nodeNames.length - 1) {
-      MNode temp = cur.getChild(nodeNames[i]);
-      if (temp == null || temp.isStorageGroup()) {
-        return false;
-      }
-      cur = cur.getChild(nodeNames[i]);
-      i++;
-    }
-    MNode temp = cur.getChild(nodeNames[i]);
-    return temp != null && temp.isStorageGroup();
-  }
-
-  private void setStorageGroup(String path, MNode node) {
-    node.setDataFileName(path);
-    if (node.getChildren() == null) {
-      return;
-    }
-    for (MNode child : node.getChildren().values()) {
-      setStorageGroup(path, child);
-    }
-  }
-
-  /**
-   * Delete one seriesPath from current Metadata Tree.
-   *
-   * @param path Format: root.node.(node)* Notice: Path must be a complete Path from root to leaf
-   * node.
-   */
-  String deletePath(String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length == 0 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("Timeseries", path);
-    }
-
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      if (!cur.hasChild(nodes[i])) {
-        throw new MTreePathException("", "is not correct",
-            String.format(NO_CHILD_ERROR, cur.getName(), nodes[i]));
-      }
-      cur = cur.getChild(nodes[i]);
-    }
-
-    // if the storage group node is deleted, the dataFileName should be
-    // return
-    String dataFileName = null;
-    if (cur.isStorageGroup()) {
-      dataFileName = cur.getDataFileName();
-    }
-    cur.getParent().deleteChild(cur.getName());
-    cur = cur.getParent();
-    while (cur != null && !MetadataConstant.ROOT.equals(cur.getName())
-        && cur.getChildren().size() == 0) {
-      if (cur.isStorageGroup()) {
-        dataFileName = cur.getDataFileName();
-        return dataFileName;
-      }
-      cur.getParent().deleteChild(cur.getName());
-      cur = cur.getParent();
-    }
-
-    return dataFileName;
-  }
-
-  /**
-   * Get ColumnSchema for given seriesPath. Notice: Path must be a complete Path from root to leaf
-   * node.
-   */
-  MeasurementSchema getSchemaForOnePath(String path) throws PathException {
-    MNode leaf = getLeafByPath(path);
-    return leaf.getSchema();
-  }
-
-  MeasurementSchema getSchemaForOnePath(MNode node, String path) throws PathException {
-    MNode leaf = getLeafByPath(node, path);
-    return leaf.getSchema();
-  }
-
-  MeasurementSchema getSchemaForOnePathWithCheck(MNode node, String path)
-      throws PathException {
-    MNode leaf = getLeafByPathWithCheck(node, path);
-    return leaf.getSchema();
-  }
-
-  MeasurementSchema getSchemaForOnePathWithCheck(String path) throws PathException {
-    MNode leaf = getLeafByPathWithCheck(path);
-    return leaf.getSchema();
-  }
-
-  private MNode getLeafByPath(String path) throws PathException {
-    getNode(path);
-    String[] node = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = getRoot();
-    for (int i = 1; i < node.length; i++) {
-      cur = cur.getChild(node[i]);
-    }
-    if (!cur.isLeaf()) {
-      throw new MTreePathException(path, NOT_LEAF_NODE, "");
-    }
-    return cur;
-  }
-
-  private MNode getLeafByPath(MNode node, String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = node.getChild(nodes[0]);
-    for (int i = 1; i < nodes.length; i++) {
-      cur = cur.getChild(nodes[i]);
-    }
-    if (!cur.isLeaf()) {
-      throw new MTreePathException(path, NOT_LEAF_NODE, "");
-    }
-    return cur;
-  }
-
-  private MNode getLeafByPathWithCheck(MNode node, String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length < 1 || !node.hasChild(nodes[0])) {
-      throw new MTreePathException("Timeseries", path);
-    }
-
-    MNode cur = node.getChild(nodes[0]);
-    for (int i = 1; i < nodes.length; i++) {
-      if (!cur.hasChild(nodes[i])) {
-        throw new MTreePathException("", "is not correct",
-            String.format(NO_CHILD_ERROR, cur.getName(), nodes[i]));
-      }
-      cur = cur.getChild(nodes[i]);
-    }
-    if (!cur.isLeaf()) {
-      throw new MTreePathException(path, NOT_LEAF_NODE, "");
-    }
-    return cur;
-  }
-
-  private MNode getLeafByPathWithCheck(String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length < 2 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("Timeseries", path);
-    }
-
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      if (!cur.hasChild(nodes[i])) {
-        throw new MTreePathException("", "is not correct",
-            String.format(NO_CHILD_ERROR, cur.getName(), nodes[i]));
-      }
-      cur = cur.getChild(nodes[i]);
-    }
-    if (!cur.isLeaf()) {
-      throw new MTreePathException(path, NOT_LEAF_NODE, "");
-    }
-    return cur;
-  }
-
-  /**
-   * function for getting node by path with file level check.
-   */
-  MNode getNodeByPathWithStorageGroupCheck(String path)
-      throws PathException, StorageGroupException {
-    boolean storageGroupChecked = false;
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length < 2 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("Timeseries", path);
-    }
-
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      if (!cur.hasChild(nodes[i])) {
-        if (!storageGroupChecked) {
-          throw new StorageGroupNotSetException(path);
-        }
-        throw new MTreePathException("", "is not correct",
-            String.format(NO_CHILD_ERROR, cur.getName(), nodes[i]));
-      }
-      cur = cur.getChild(nodes[i]);
-
-      if (cur.isStorageGroup()) {
-        storageGroupChecked = true;
-      }
-    }
-
-    if (!storageGroupChecked) {
-      throw new StorageGroupNotSetException(path);
-    }
-    return cur;
-  }
-
-  /**
-   * find and return a seriesPath specified by the path
-   *
-   * @return last node in given seriesPath
-   */
-  MNode getNode(String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length < 2 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("Timeseries", path);
-    }
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      if (!cur.hasChild(nodes[i])) {
-        throw new MTreePathException(
-            "Path: [" + path + "] doesn't correspond to any known time series");
-      }
-      cur = cur.getChild(nodes[i]);
-    }
-    return cur;
-  }
-
-  private void checkPath(MNode node, String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length < 1) {
-      return;
-    }
-    MNode cur = node;
-    for (String node1 : nodes) {
-      if (!cur.hasChild(node1)) {
-        throw new MTreePathException("", "is not correct",
-            String.format(NO_CHILD_ERROR, cur.getName(), node1));
-      }
-      cur = cur.getChild(node1);
-    }
-  }
-
-  /**
-   * Get the storage group seriesPath from the seriesPath.
-   *
-   * @return String storage group seriesPath
-   */
-  String getStorageGroupNameByPath(String path) throws StorageGroupException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      if (cur == null) {
-        throw new StorageGroupPathException(path);
-      } else if (cur.isStorageGroup()) {
-        return cur.getDataFileName();
-      } else {
-        cur = cur.getChild(nodes[i]);
-      }
-    }
-    if (cur.isStorageGroup()) {
-      return cur.getDataFileName();
-    }
-    throw new StorageGroupPathException(path);
-  }
-
-  /**
-   * Get all the storage group seriesPaths for one seriesPath.
-   *
-   * @return List storage group seriesPath list
-   * @apiNote :for cluster
-   */
-  List<String> getAllFileNamesByPath(String pathReg) throws PathException {
-    ArrayList<String> fileNames = new ArrayList<>();
-    String[] nodes = MetaUtils.getNodeNames(pathReg, PATH_SEPARATOR);
-    if (nodes.length == 0 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("Timeseries", pathReg);
-    }
-    findFileName(getRoot(), nodes, 1, "", fileNames);
-    return fileNames;
-  }
-
-  /**
-   * Recursively find all fileName according to a specific path
-   *
-   * @apiNote :for cluster
-   */
-  private void findFileName(MNode node, String[] nodes, int idx, String parent,
-      ArrayList<String> paths) {
-    if (node.isStorageGroup()) {
-      paths.add(node.getDataFileName());
-      return;
-    }
-    String nodeReg;
-    if (idx >= nodes.length) {
-      nodeReg = "*";
-    } else {
-      nodeReg = nodes[idx];
-    }
-
-    if (!("*").equals(nodeReg)) {
-      if (node.hasChild(nodeReg)) {
-        findFileName(node.getChild(nodeReg), nodes, idx + 1, parent + node.getName() + ".", paths);
-      }
-    } else {
-      for (MNode child : node.getChildren().values()) {
-        findFileName(child, nodes, idx + 1, parent + node.getName() + ".", paths);
-      }
-    }
-  }
-
-  /**
-   * function for getting file name by path.
-   */
-  String getStorageGroupNameByPath(MNode node, String path) throws StorageGroupException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = node.getChild(nodes[0]);
-    for (int i = 1; i < nodes.length; i++) {
-      if (cur == null) {
-        throw new StorageGroupPathException(path);
-      } else if (cur.isStorageGroup()) {
-        return cur.getDataFileName();
-      } else {
-        cur = cur.getChild(nodes[i]);
-      }
-    }
-    if (cur.isStorageGroup()) {
-      return cur.getDataFileName();
-    }
-    throw new StorageGroupPathException(path);
-  }
-
-  /**
-   * Check the prefix of this seriesPath is storage group seriesPath.
-   *
-   * @return true the prefix of this seriesPath is storage group seriesPath false the prefix of this
-   * seriesPath is not storage group seriesPath
-   */
-  boolean checkFileNameByPath(String path) {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = getRoot();
-    for (int i = 1; i <= nodes.length; i++) {
-      if (cur == null) {
-        return false;
-      } else if (cur.isStorageGroup()) {
-        return true;
-      } else {
-        cur = cur.getChild(nodes[i]);
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Get all paths for given seriesPath regular expression Regular expression in this method is
-   * formed by the amalgamation of seriesPath and the character '*'.
-   *
-   * @return A HashMap whose Keys are separated by the storage file name.
-   */
-  HashMap<String, List<String>> getAllPath(String pathReg) throws PathException {
-    HashMap<String, List<String>> paths = new HashMap<>();
-    String[] nodes = MetaUtils.getNodeNames(pathReg, PATH_SEPARATOR);
-    if (nodes.length == 0 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("Timeseries", pathReg);
-    }
-    findPath(getRoot(), nodes, 1, "", paths);
-    return paths;
-  }
-
-  /**
-   * @return all storage groups' MNodes
-   */
-  List<MNode> getAllStorageGroupNodes() {
-    List<MNode> ret = new ArrayList<>();
-    Stack<MNode> nodeStack = new Stack<>();
-    nodeStack.add(getRoot());
-    while (!nodeStack.isEmpty()) {
-      MNode current = nodeStack.pop();
-      if (current.isStorageGroup()) {
-        ret.add(current);
-      } else if (current.hasChildren()) {
-        nodeStack.addAll(current.getChildren().values());
-      }
-    }
-    return ret;
-  }
-
-  /**
-   * function for getting all timeseries paths under the given seriesPath.
-   */
-  List<List<String>> getShowTimeseriesPath(String pathReg) throws PathException {
-    List<List<String>> res = new ArrayList<>();
-    String[] nodes = MetaUtils.getNodeNames(pathReg, PATH_SEPARATOR);
-    if (nodes.length == 0 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("Timeseries", pathReg);
-    }
-    findPath(getRoot(), nodes, 1, "", res);
-    return res;
-  }
-
-  /**
-   * function for getting leaf node path in the next level of the given path.
-   *
-   * @return All leaf nodes' seriesPath(s) of given seriesPath.
-   */
-  List<String> getLeafNodePathInNextLevel(String path) throws PathException {
-    List<String> ret = new ArrayList<>();
-    MNode cur = getNode(path);
-    for (MNode child : cur.getChildren().values()) {
-      if (child.isLeaf()) {
-        ret.add(path + "." + child.getName());
-      }
-    }
-    return ret;
-  }
-  
-  /**
-   * function for getting child node path in the next level of the given path.
-   *
-   * @return All child nodes' seriesPath(s) of given seriesPath.
-   */
-  Set<String> getChildNodePathInNextLevel(String path) throws PathException {
-    Set<String> ret = new HashSet<>();
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (!nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("The prefix of the seriesPath [%s] is not one storage group seriesPath", path);
-
-    }
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      if (!cur.hasChild(nodes[i])) {
-        throw new MTreePathException("Path: \"" + path + "\" doesn't correspond to any known time series");
-      }
-      cur = cur.getChild(nodes[i]);
-    }
-    if (!cur.hasChildren()) {
-      throw new MTreePathException("Path: \"" + path + "\" doesn't have a child node");
-    }
-    for (MNode child : cur.getChildren().values()) {
-      ret.add(path + "." + child.getName());
-    }
-    return ret;
-  }  
-
-  /**
-   * function for getting all paths in list.
-   */
-  List<String> getAllPathInList(String path) throws PathException {
-    List<String> res = new ArrayList<>();
-    HashMap<String, List<String>> mapRet = getAllPath(path);
-    for (List<String> value : mapRet.values()) {
-      res.addAll(value);
-    }
-    return res;
-  }
-
-  /**
-   * Calculate the count of storage-level nodes included in given seriesPath.
-   *
-   * @return The total count of storage-level nodes.
-   */
-  int getFileCountForOneType(String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length != 2 || !nodes[0].equals(getRoot().getName()) || !getRoot()
-        .hasChild(nodes[1])) {
-      throw new MTreePathException("Timeseries must be " + getRoot().getName()
-          + ". X (X is one of the nodes of root's children)");
-    }
-    return getFileCountForOneNode(getRoot().getChild(nodes[1]));
-  }
-
-  private int getFileCountForOneNode(MNode node) {
-
-    if (node.isStorageGroup()) {
-      return 1;
-    }
-    int sum = 0;
-    if (!node.isLeaf()) {
-      for (MNode child : node.getChildren().values()) {
-        sum += getFileCountForOneNode(child);
-      }
-    }
-    return sum;
-  }
-
-  /**
-   * Get all device type in current Metadata Tree.
-   *
-   * @return a list contains all distinct device type
-   */
-  ArrayList<String> getAllType() {
-    ArrayList<String> res = new ArrayList<>();
-    if (getRoot() != null) {
-      res.addAll(getRoot().getChildren().keySet());
-    }
-    return res;
-  }
-
-  /**
-   * Get all storage groups in current Metadata Tree.
-   *
-   * @return a list contains all distinct storage groups
-   */
-  List<String> getAllStorageGroupList() {
-    List<String> res = new ArrayList<>();
-    MNode rootNode;
-    if ((rootNode = getRoot()) != null) {
-      findStorageGroup(rootNode, "root", res);
-    }
-    return res;
-  }
-
-  private void findStorageGroup(MNode node, String path, List<String> res) {
-    if (node.isStorageGroup()) {
-      res.add(path);
-      return;
-    }
-    for (MNode childNode : node.getChildren().values()) {
-      findStorageGroup(childNode, path + "." + childNode.toString(), res);
-    }
-  }
-
-  /**
-   * Get all devices in current Metadata Tree.
-   *
-   * @return a list contains all distinct device names
-   */
-  List<String> getAllDevices() throws PathException {
-    return getDevices(SQLConstant.ROOT);
-  }
-
-  /**
-   * Get all devices in current Metadata Tree with prefixPath.
-   *
-   * @return a list contains all distinct devices names
-   */
-  List<String> getDevices(String prefixPath) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(prefixPath, PATH_SEPARATOR);
-    if (nodes.length == 0 || !nodes[0].equals(getRoot().getName())) {
-      throw new MTreePathException("PrefixPath", prefixPath);
-    }
-    List<String> devices = new ArrayList<>();
-    findDevices(getRoot(), nodes, 1, "", devices);
-    return devices;
-  }
-
-  /**
-   * Traverse the MTree to match all devices with prefix path.
-   * @param node the current traversing node
-   * @param nodes split the prefix path with '.'
-   * @param idx the current index of array nodes
-   * @param parent store the node string having traversed
-   * @param res store all matched device names
-   */
-  private void findDevices(MNode node, String[] nodes, int idx, String parent, List<String> res) {
-    String nodeReg;
-    if (idx >= nodes.length) {
-      nodeReg = "*";
-    } else {
-      nodeReg = nodes[idx];
-    }
-    if (!("*").equals(nodeReg)) {
-      if (node.hasChild(nodeReg)) {
-        if(node.getChild(nodeReg).isLeaf()){
-          res.add(parent + node.getName());
-        } else{
-          findDevices(node.getChild(nodeReg), nodes, idx + 1, parent + node.getName() + ".", res);
-        }
-      }
-    } else {
-      boolean deviceAdded = false;
-      for (MNode child : node.getChildren().values()) {
-        if(child.isLeaf() && !deviceAdded){
-          res.add(parent + node.getName());
-          deviceAdded = true;
-        } else if (!child.isLeaf()){
-          findDevices(child, nodes, idx + 1, parent + node.getName() + ".", res);
-        }
-      }
-    }
-  }
-
-  /**
-   * Get all nodes at the given level in current Metadata Tree.
-   *
-   * @return a list contains all nodes at the given level
-   */
-  List<String> getNodesList(String schemaPattern, int nodeLevel) throws SQLException {
-    List<String> res = new ArrayList<>();
-    String[] nodes = MetaUtils.getNodeNames(schemaPattern, PATH_SEPARATOR);
-    MNode node;
-    if ((node = getRoot()) != null) {
-      if (nodes[0].equals("root")) {
-        for (int i = 1; i < nodes.length; i++) {
-          if (node.getChild(nodes[i]) != null) {
-            node = node.getChild(nodes[i]);
-          } else {
-            throw new SQLException(nodes[i - 1] + " does not have the child node " + nodes[i]);
+          ConcurrentHashMap<String, MNode> childrenMap = new ConcurrentHashMap<>();
+          for (int i = 0; i < childrenSize; i++) {
+            MNode child = nodeStack.removeFirst();
+            child.setParent(node);
+            childrenMap.put(child.getName(), child);
+            if (child instanceof MeasurementMNode) {
+              String alias = ((MeasurementMNode) child).getAlias();
+              if (alias != null) {
+                node.addAlias(alias, child);
+              }
+            }
           }
+          node.setChildren(childrenMap);
+          nodeStack.push(node);
         }
-        findNodes(node, schemaPattern, res, nodeLevel - (nodes.length - 1));
-      } else {
-        throw new SQLException("Incorrect root node " + nodes[0] + " selected");
       }
-    }
-    return res;
-  }
-
-  private void findNodes(MNode node, String path, List<String> res, int targetLevel) {
-    if (node == null) {
-      return;
-    }
-    if (targetLevel == 0) {
-      res.add(path);
-      return;
-    }
-    if (node.hasChildren()) {
-      for (MNode child : node.getChildren().values()) {
-        findNodes(child, path + "." + child.toString(), res, targetLevel - 1);
-      }
+      return new MTree(node);
+    } catch (IOException e) {
+      logger.warn("Failed to deserialize from {}. Use a new MTree.", mtreeSnapshot.getPath());
+      return new MTree();
+    } finally {
+      limit = new ThreadLocal<>();
+      offset = new ThreadLocal<>();
+      count = new ThreadLocal<>();
+      curOffset = new ThreadLocal<>();
     }
   }
 
-  /**
-   * Get all delta objects for given type.
-   *
-   * @param type device Type
-   * @return a list contains all delta objects for given type
-   */
-  ArrayList<String> getDeviceForOneType(String type) throws PathException {
-    String path = getRoot().getName() + "." + type;
-    getNode(path);
-    HashMap<String, Integer> deviceMap = new HashMap<>();
-    MNode typeNode = getRoot().getChild(type);
-    putDeviceToMap(getRoot().getName(), typeNode, deviceMap);
-    return new ArrayList<>(deviceMap.keySet());
-  }
-
-  private void putDeviceToMap(String path, MNode node, HashMap<String, Integer> deviceMap) {
-    if (node.isLeaf()) {
-      deviceMap.put(path, 1);
-    } else {
-      for (String child : node.getChildren().keySet()) {
-        String newPath = path + "." + node.getName();
-        putDeviceToMap(newPath, node.getChildren().get(child), deviceMap);
-      }
-    }
-  }
-
-  /**
-   * Get all ColumnSchemas for given delta object type.
-   *
-   * @param path A seriesPath represented one Delta object
-   * @return a list contains all column schema
-   */
-  ArrayList<MeasurementSchema> getSchemaForOneType(String path) throws PathException {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    if (nodes.length != 2 || !nodes[0].equals(getRoot().getName()) || !getRoot()
-        .hasChild(nodes[1])) {
-      throw new MTreePathException("Timeseries must be " + getRoot().getName()
-          + ". X (X is one of the nodes of root's children)");
-    }
-    HashMap<String, MeasurementSchema> leafMap = new HashMap<>();
-    putLeafToLeafMap(getRoot().getChild(nodes[1]), leafMap);
-    return new ArrayList<>(leafMap.values());
-  }
-
-  /**
-   * Get all ColumnSchemas for the storage group seriesPath.
-   *
-   * @return ArrayList<ColumnSchema> The list of the schema
-   */
-  ArrayList<MeasurementSchema> getSchemaForOneStorageGroup(String path) {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    HashMap<String, MeasurementSchema> leafMap = new HashMap<>();
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      cur = cur.getChild(nodes[i]);
-    }
-    // cur is the storage group node
-    putLeafToLeafMap(cur, leafMap);
-    return new ArrayList<>(leafMap.values());
-  }
-
-  /**
-   * function for getting schema map for one storage group.
-   */
-  Map<String, MeasurementSchema> getSchemaMapForOneStorageGroup(String path) {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      cur = cur.getChild(nodes[i]);
-    }
-    return cur.getSchemaMap();
-  }
-
-  /**
-   * function for getting num schema map for one file node.
-   */
-  Map<String, Integer> getNumSchemaMapForOneFileNode(String path) {
-    String[] nodes = MetaUtils.getNodeNames(path, PATH_SEPARATOR);
-    MNode cur = getRoot();
-    for (int i = 1; i < nodes.length; i++) {
-      cur = cur.getChild(nodes[i]);
-    }
-    return cur.getNumSchemaMap();
-  }
-
-  private void putLeafToLeafMap(MNode node, HashMap<String, MeasurementSchema> leafMap) {
-    if (node.isLeaf()) {
-      if (!leafMap.containsKey(node.getName())) {
-        leafMap.put(node.getName(), node.getSchema());
-      }
-      return;
-    }
-    for (MNode child : node.getChildren().values()) {
-      putLeafToLeafMap(child, leafMap);
-    }
-  }
-
-  private void findPath(MNode node, String[] nodes, int idx, String parent,
-      HashMap<String, List<String>> paths) {
-    if (node.isLeaf()) {
-      if (nodes.length <= idx) {
-        String fileName = node.getDataFileName();
-        String nodeName;
-        if (node.getName().contains(TsFileConstant.PATH_SEPARATOR)) {
-          nodeName = "\"" + node + "\"";
-        } else {
-          nodeName = "" + node;
-        }
-        String nodePath = parent + nodeName;
-        putAPath(paths, fileName, nodePath);
-      }
-      return;
-    }
-    String nodeReg;
-    if (idx >= nodes.length) {
-      nodeReg = "*";
-    } else {
-      nodeReg = nodes[idx];
-    }
-
-    if (!("*").equals(nodeReg)) {
-      if (node.hasChild(nodeReg)) {
-        findPath(node.getChild(nodeReg), nodes, idx + 1, parent + node.getName() + ".", paths);
-      }
-    } else {
-      for (MNode child : node.getChildren().values()) {
-        findPath(child, nodes, idx + 1, parent + node.getName() + ".", paths);
-      }
-    }
-  }
-
-  /*
-   * Iterate through MTree to fetch metadata info of all leaf nodes under the given seriesPath
-   */
-  private void findPath(MNode node, String[] nodes, int idx, String parent,
-      List<List<String>> res) {
-    if (node.isLeaf()) {
-      if (nodes.length <= idx) {
-        String nodePath = parent + node;
-        List<String> tsRow = new ArrayList<>(5);// get [name,storage group,resultDataType,encoding]
-        tsRow.add(nodePath);
-        MeasurementSchema measurementSchema = node.getSchema();
-        tsRow.add(node.getDataFileName());
-        tsRow.add(measurementSchema.getType().toString());
-        tsRow.add(measurementSchema.getEncodingType().toString());
-        tsRow.add(measurementSchema.getCompressor().toString());
-        res.add(tsRow);
-      }
-      return;
-    }
-    String nodeReg;
-    if (idx >= nodes.length) {
-      nodeReg = "*";
-    } else {
-      nodeReg = nodes[idx];
-    }
-
-    if (!("*").equals(nodeReg)) {
-      if (node.hasChild(nodeReg)) {
-        findPath(node.getChild(nodeReg), nodes, idx + 1, parent + node.getName() + ".", res);
-      }
-    } else {
-      for (MNode child : node.getChildren().values()) {
-        findPath(child, nodes, idx + 1, parent + node.getName() + ".", res);
-      }
-    }
-  }
-
-  private void putAPath(HashMap<String, List<String>> paths, String fileName,
-      String nodePath) {
-    if (paths.containsKey(fileName)) {
-      paths.get(fileName).add(nodePath);
-    } else {
-      List<String> pathList = new ArrayList<>();
-      pathList.add(nodePath);
-      paths.put(fileName, pathList);
-    }
-  }
-
-  @Override
-  public String toString() {
-    return jsonToString(toJson());
-  }
-
-  private static String jsonToString(JSONObject jsonObject) {
-    return JSON.toJSONString(jsonObject, SerializerFeature.PrettyFormat);
-  }
-
-  private JSONObject toJson() {
-    JSONObject jsonObject = new JSONObject();
-    jsonObject.put(getRoot().getName(), mNodeToJSON(getRoot()));
-    return jsonObject;
-  }
-
-  private JSONObject mNodeToJSON(MNode node) {
-    JSONObject jsonObject = new JSONObject();
-    if (!node.isLeaf() && node.getChildren().size() > 0) {
-      for (MNode child : node.getChildren().values()) {
-        jsonObject.put(child.getName(), mNodeToJSON(child));
-      }
-    } else if (node.isLeaf()) {
-      jsonObject.put("DataType", node.getSchema().getType());
-      jsonObject.put("Encoding", node.getSchema().getEncodingType());
-      jsonObject.put("Compressor", node.getSchema().getCompressor());
-      jsonObject.put("args", node.getSchema().getProps().toString());
-      jsonObject.put("StorageGroup", node.getDataFileName());
-    }
-    return jsonObject;
-  }
-
-  public MNode getRoot() {
-    return root;
+  private static String jsonToString(JsonObject jsonObject) {
+    return GSON.toJson(jsonObject);
   }
 
   /**
    * combine multiple metadata in string format
+   *
    */
-  static String combineMetadataInStrings(String[] metadataStrs) {
-    JSONObject[] jsonObjects = new JSONObject[metadataStrs.length];
+  @TestOnly
+  static JsonObject combineMetadataInStrings(String[] metadataStrs) {
+    JsonObject[] jsonObjects = new JsonObject[metadataStrs.length];
     for (int i = 0; i < jsonObjects.length; i++) {
-      jsonObjects[i] = JSONObject.parseObject(metadataStrs[i]);
+      jsonObjects[i] = GSON.fromJson(metadataStrs[i], JsonObject.class);
     }
 
-    JSONObject root = jsonObjects[0];
+    JsonObject root = jsonObjects[0];
     for (int i = 1; i < jsonObjects.length; i++) {
-      root = combineJSONObjects(root, jsonObjects[i]);
+      root = combineJsonObjects(root, jsonObjects[i]);
     }
-    return jsonToString(root);
+    
+    return root;
   }
 
-  private static JSONObject combineJSONObjects(JSONObject a, JSONObject b) {
-    JSONObject res = new JSONObject();
+  private static JsonObject combineJsonObjects(JsonObject a, JsonObject b) {
+    JsonObject res = new JsonObject();
 
     Set<String> retainSet = new HashSet<>(a.keySet());
     retainSet.retainAll(b.keySet());
@@ -1097,21 +199,1100 @@ public class MTree implements Serializable {
     Set<String> bCha = new HashSet<>(b.keySet());
     aCha.removeAll(retainSet);
     bCha.removeAll(retainSet);
+
     for (String key : aCha) {
-      res.put(key, a.getJSONObject(key));
+      res.add(key, a.get(key));
     }
+
     for (String key : bCha) {
-      res.put(key, b.get(key));
+      res.add(key, b.get(key));
     }
     for (String key : retainSet) {
-      Object v1 = a.get(key);
-      Object v2 = b.get(key);
-      if (v1 instanceof JSONObject && v2 instanceof JSONObject) {
-        res.put(key, combineJSONObjects((JSONObject) v1, (JSONObject) v2));
+      JsonElement v1 = a.get(key);
+      JsonElement v2 = b.get(key);
+      if (v1 instanceof JsonObject && v2 instanceof JsonObject) {
+        res.add(key, combineJsonObjects((JsonObject) v1, (JsonObject) v2));
       } else {
-        res.put(key, v1);
+        res.add(v1.getAsString(), v2);
       }
     }
     return res;
+  }
+
+  /**
+   * Create a timeseries with a full path from root to leaf node Before creating a timeseries, the
+   * storage group should be set first, throw exception otherwise
+   *
+   * @param path       timeseries path
+   * @param dataType   data type
+   * @param encoding   encoding
+   * @param compressor compressor
+   * @param props      props
+   * @param alias      alias of measurement
+   */
+  MeasurementMNode createTimeseries(PartialPath path, TSDataType dataType, TSEncoding encoding,
+      CompressionType compressor, Map<String, String> props, String alias)
+      throws MetadataException {
+    String[] nodeNames = path.getNodes();
+    if (nodeNames.length <= 2 || !nodeNames[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    MNode cur = root;
+    boolean hasSetStorageGroup = false;
+    // e.g, path = root.sg.d1.s1,  create internal nodes and set cur to d1 node
+    for (int i = 1; i < nodeNames.length - 1; i++) {
+      String nodeName = nodeNames[i];
+      if (cur instanceof StorageGroupMNode) {
+        hasSetStorageGroup = true;
+      }
+      if (!cur.hasChild(nodeName)) {
+        if (!hasSetStorageGroup) {
+          throw new StorageGroupNotSetException("Storage group should be created first");
+        }
+        cur.addChild(nodeName, new MNode(cur, nodeName));
+      }
+      cur = cur.getChild(nodeName);
+    }
+    String leafName = nodeNames[nodeNames.length - 1];
+
+    // synchronize check and add, we need addChild and add Alias become atomic operation
+    // only write on mtree will be synchronized
+    synchronized (this) {
+      if (cur.hasChild(leafName)) {
+        throw new PathAlreadyExistException(path.getFullPath());
+      }
+      if (alias != null && cur.hasChild(alias)) {
+        throw new AliasAlreadyExistException(path.getFullPath(), alias);
+      }
+      MeasurementMNode leaf = new MeasurementMNode(cur, leafName, alias, dataType, encoding,
+          compressor, props);
+
+      cur.addChild(leafName, leaf);
+
+      // link alias to LeafMNode
+      if (alias != null) {
+        cur.addAlias(alias, leaf);
+      }
+
+      return leaf;
+    }
+  }
+
+  /**
+   * Add an interval path to MTree. This is only used for automatically creating schema
+   *
+   * <p>e.g., get root.sg.d1, get or create all internal nodes and return the node of d1
+   */
+  MNode getDeviceNodeWithAutoCreating(PartialPath deviceId, int sgLevel) throws MetadataException {
+    String[] nodeNames = deviceId.getNodes();
+    if (nodeNames.length <= 1 || !nodeNames[0].equals(root.getName())) {
+      throw new IllegalPathException(deviceId.getFullPath());
+    }
+    MNode cur = root;
+    for (int i = 1; i < nodeNames.length; i++) {
+      if (!cur.hasChild(nodeNames[i])) {
+        if (i == sgLevel) {
+          cur.addChild(nodeNames[i], new StorageGroupMNode(cur, nodeNames[i],
+              IoTDBDescriptor.getInstance().getConfig().getDefaultTTL()));
+        } else {
+          cur.addChild(nodeNames[i], new MNode(cur, nodeNames[i]));
+        }
+      }
+      cur = cur.getChild(nodeNames[i]);
+    }
+    return cur;
+  }
+
+  /**
+   * Check whether the given path exists.
+   *
+   * @param path a full path or a prefix path
+   */
+  boolean isPathExist(PartialPath path) {
+    String[] nodeNames = path.getNodes();
+    MNode cur = root;
+    if (!nodeNames[0].equals(root.getName())) {
+      return false;
+    }
+    for (int i = 1; i < nodeNames.length; i++) {
+      String childName = nodeNames[i];
+      cur = cur.getChild(childName);
+      if (cur == null) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Set storage group. Make sure check seriesPath before setting storage group
+   *
+   * @param path path
+   */
+  void setStorageGroup(PartialPath path) throws MetadataException {
+    String[] nodeNames = path.getNodes();
+    checkStorageGroup(path.getFullPath());
+    MNode cur = root;
+    if (nodeNames.length <= 1 || !nodeNames[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    int i = 1;
+    // e.g., path = root.a.b.sg, create internal nodes for a, b
+    while (i < nodeNames.length - 1) {
+      MNode temp = cur.getChild(nodeNames[i]);
+      if (temp == null) {
+        cur.addChild(nodeNames[i], new MNode(cur, nodeNames[i]));
+      } else if (temp instanceof StorageGroupMNode) {
+        // before set storage group, check whether the exists or not
+        throw new StorageGroupAlreadySetException(temp.getFullPath());
+      }
+      cur = cur.getChild(nodeNames[i]);
+      i++;
+    }
+    if (cur.hasChild(nodeNames[i])) {
+      // node b has child sg
+      throw new StorageGroupAlreadySetException(path.getFullPath());
+    } else {
+      StorageGroupMNode storageGroupMNode =
+          new StorageGroupMNode(
+              cur, nodeNames[i], IoTDBDescriptor.getInstance().getConfig().getDefaultTTL());
+      cur.addChild(nodeNames[i], storageGroupMNode);
+    }
+  }
+
+  private void checkStorageGroup(String storageGroup) throws IllegalPathException {
+    if (!IoTDBConfig.STORAGE_GROUP_PATTERN.matcher(storageGroup).matches()) {
+      throw new IllegalPathException(String
+          .format("The storage group name can only be characters, numbers and underscores. %s",
+              storageGroup));
+    }
+  }
+
+  /**
+   * Delete a storage group
+   */
+  List<MeasurementMNode> deleteStorageGroup(PartialPath path) throws MetadataException {
+    MNode cur = getNodeByPath(path);
+    if (!(cur instanceof StorageGroupMNode)) {
+      throw new StorageGroupNotSetException(path.getFullPath());
+    }
+    // Suppose current system has root.a.b.sg1, root.a.sg2, and delete root.a.b.sg1
+    // delete the storage group node sg1
+    cur.getParent().deleteChild(cur.getName());
+
+    // collect all the LeafMNode in this storage group
+    List<MeasurementMNode> leafMNodes = new LinkedList<>();
+    Queue<MNode> queue = new LinkedList<>();
+    queue.add(cur);
+    while (!queue.isEmpty()) {
+      MNode node = queue.poll();
+      for (MNode child : node.getChildren().values()) {
+        if (child instanceof MeasurementMNode) {
+          leafMNodes.add((MeasurementMNode) child);
+        } else {
+          queue.add(child);
+        }
+      }
+    }
+
+    cur = cur.getParent();
+    // delete node b while retain root.a.sg2
+    while (!IoTDBConstant.PATH_ROOT.equals(cur.getName()) && cur.getChildren().size() == 0) {
+      cur.getParent().deleteChild(cur.getName());
+      cur = cur.getParent();
+    }
+    return leafMNodes;
+  }
+
+  /**
+   * Check whether path is storage group or not
+   *
+   * <p>e.g., path = root.a.b.sg. if nor a and b is StorageGroupMNode and sg is a StorageGroupMNode
+   * path is a storage group
+   *
+   * @param path path
+   * @apiNote :for cluster
+   */
+  boolean isStorageGroup(PartialPath path) {
+    String[] nodeNames = path.getNodes();
+    if (nodeNames.length <= 1 || !nodeNames[0].equals(IoTDBConstant.PATH_ROOT)) {
+      return false;
+    }
+    MNode cur = root;
+    int i = 1;
+    while (i < nodeNames.length - 1) {
+      cur = cur.getChild(nodeNames[i]);
+      if (cur == null || cur instanceof StorageGroupMNode) {
+        return false;
+      }
+      i++;
+    }
+    cur = cur.getChild(nodeNames[i]);
+    return cur instanceof StorageGroupMNode;
+  }
+
+  /**
+   * Delete path. The path should be a full path from root to leaf node
+   *
+   * @param path Format: root.node(.node)+
+   */
+  Pair<PartialPath, MeasurementMNode> deleteTimeseriesAndReturnEmptyStorageGroup(PartialPath path)
+      throws MetadataException {
+    MNode curNode = getNodeByPath(path);
+    if (!(curNode instanceof MeasurementMNode)) {
+      throw new PathNotExistException(path.getFullPath());
+    }
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !IoTDBConstant.PATH_ROOT.equals(nodes[0])) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    // delete the last node of path
+    curNode.getParent().deleteChild(curNode.getName());
+    MeasurementMNode deletedNode = (MeasurementMNode) curNode;
+    if (deletedNode.getAlias() != null) {
+      curNode.getParent().deleteAliasChild(((MeasurementMNode) curNode).getAlias());
+    }
+    curNode = curNode.getParent();
+    // delete all empty ancestors except storage group
+    while (!IoTDBConstant.PATH_ROOT.equals(curNode.getName())
+        && curNode.getChildren().size() == 0) {
+      // if current storage group has no time series, return the storage group name
+      if (curNode instanceof StorageGroupMNode) {
+        return new Pair<>(curNode.getPartialPath(), deletedNode);
+      }
+      curNode.getParent().deleteChild(curNode.getName());
+      curNode = curNode.getParent();
+    }
+    return new Pair<>(null, deletedNode);
+  }
+
+  /**
+   * Get measurement schema for a given path. Path must be a complete Path from root to leaf node.
+   */
+  MeasurementSchema getSchema(PartialPath path) throws MetadataException {
+    MeasurementMNode node = (MeasurementMNode) getNodeByPath(path);
+    return node.getSchema();
+  }
+
+  /**
+   * Get node by path with storage group check If storage group is not set,
+   * StorageGroupNotSetException will be thrown
+   */
+  MNode getNodeByPathWithStorageGroupCheck(PartialPath path) throws MetadataException {
+    boolean storageGroupChecked = false;
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+
+    MNode cur = root;
+    for (int i = 1; i < nodes.length; i++) {
+      cur = cur.getChild(nodes[i]);
+      if (cur == null) {
+        // not find
+        if (!storageGroupChecked) {
+          throw new StorageGroupNotSetException(path.getFullPath());
+        }
+        throw new PathNotExistException(path.getFullPath());
+      }
+
+      if (cur instanceof StorageGroupMNode) {
+        storageGroupChecked = true;
+      }
+    }
+
+    if (!storageGroupChecked) {
+      throw new StorageGroupNotSetException(path.getFullPath());
+    }
+    return cur;
+  }
+
+  /**
+   * E.g., root.sg is storage group given [root, sg], return the MNode of root.sg given [root, sg,
+   * device], throw exception Get storage group node, if the give path is not a storage group, throw
+   * exception
+   */
+  StorageGroupMNode getStorageGroupNodeByStorageGroupPath(PartialPath path)
+      throws MetadataException {
+    MNode node = getNodeByPath(path);
+    if (node instanceof StorageGroupMNode) {
+      return (StorageGroupMNode) node;
+    } else {
+      throw new StorageGroupNotSetException(path.getFullPath());
+    }
+  }
+
+  /**
+   * E.g., root.sg is storage group given [root, sg], return the MNode of root.sg given [root, sg,
+   * device], return the MNode of root.sg Get storage group node, the give path don't need to be
+   * storage group path.
+   */
+  StorageGroupMNode getStorageGroupNodeByPath(PartialPath path) throws MetadataException {
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    MNode cur = root;
+    for (int i = 1; i < nodes.length; i++) {
+      cur = cur.getChild(nodes[i]);
+      if (cur instanceof StorageGroupMNode) {
+        return (StorageGroupMNode) cur;
+      }
+    }
+    throw new StorageGroupNotSetException(path.getFullPath());
+  }
+
+  /**
+   * Get node by the path
+   *
+   * @return last node in given seriesPath
+   */
+  MNode getNodeByPath(PartialPath path) throws MetadataException {
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    MNode cur = root;
+    for (int i = 1; i < nodes.length; i++) {
+      cur = cur.getChild(nodes[i]);
+      if (cur == null) {
+        throw new PathNotExistException(path.getFullPath());
+      }
+    }
+    return cur;
+  }
+
+  /**
+   * Get all storage groups under the given path
+   *
+   * @return storage group list
+   * @apiNote :for cluster
+   */
+  List<String> getStorageGroupByPath(PartialPath path) throws MetadataException {
+    List<String> storageGroups = new ArrayList<>();
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    findStorageGroup(root, nodes, 1, "", storageGroups);
+    return storageGroups;
+  }
+
+  /**
+   * Recursively find all storage group according to a specific path
+   *
+   * @apiNote :for cluster
+   */
+  private void findStorageGroup(
+      MNode node, String[] nodes, int idx, String parent, List<String> storageGroupNames) {
+    if (node instanceof StorageGroupMNode) {
+      storageGroupNames.add(node.getFullPath());
+      return;
+    }
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!(PATH_WILDCARD).equals(nodeReg)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        findStorageGroup(
+            next,
+            nodes,
+            idx + 1,
+            parent + node.getName() + PATH_SEPARATOR,
+            storageGroupNames);
+      }
+    } else {
+      for (MNode child : node.getChildren().values()) {
+        findStorageGroup(
+            child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR, storageGroupNames);
+      }
+    }
+  }
+
+  /**
+   * Get all storage group names
+   *
+   * @return a list contains all distinct storage groups
+   */
+  List<PartialPath> getAllStorageGroupPaths() {
+    List<PartialPath> res = new ArrayList<>();
+    Deque<MNode> nodeStack = new ArrayDeque<>();
+    nodeStack.add(root);
+    while (!nodeStack.isEmpty()) {
+      MNode current = nodeStack.pop();
+      if (current instanceof StorageGroupMNode) {
+        res.add(current.getPartialPath());
+      } else {
+        nodeStack.addAll(current.getChildren().values());
+      }
+    }
+    return res;
+  }
+
+  /**
+   * Get all storage group under give path
+   *
+   * @return a list contains all storage group names under give path
+   */
+  List<PartialPath> getStorageGroupPaths(PartialPath prefixPath) throws MetadataException {
+    String[] nodes = prefixPath.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(prefixPath.getFullPath());
+    }
+    List<PartialPath> storageGroupPaths = new ArrayList<>();
+    findStorageGroupPaths(root, nodes, 1, "", storageGroupPaths);
+    return storageGroupPaths;
+  }
+
+  /**
+   * Traverse the MTree to match all storage group with prefix path.
+   *
+   * @param node              the current traversing node
+   * @param nodes             split the prefix path with '.'
+   * @param idx               the current index of array nodes
+   * @param parent            current parent path
+   * @param storageGroupPaths store all matched storage group names
+   */
+  private void findStorageGroupPaths(MNode node, String[] nodes, int idx, String parent,
+      List<PartialPath> storageGroupPaths) {
+    if (node instanceof StorageGroupMNode && idx >= nodes.length) {
+      storageGroupPaths.add(node.getPartialPath());
+      return;
+    }
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!(PATH_WILDCARD).equals(nodeReg)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        findStorageGroupPaths(next, nodes, idx + 1,
+            parent + node.getName() + PATH_SEPARATOR, storageGroupPaths);
+      }
+    } else {
+      for (MNode child : node.getChildren().values()) {
+        findStorageGroupPaths(
+            child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR, storageGroupPaths);
+      }
+    }
+  }
+
+  /**
+   * Get all storage group MNodes
+   */
+  List<StorageGroupMNode> getAllStorageGroupNodes() {
+    List<StorageGroupMNode> ret = new ArrayList<>();
+    Deque<MNode> nodeStack = new ArrayDeque<>();
+    nodeStack.add(root);
+    while (!nodeStack.isEmpty()) {
+      MNode current = nodeStack.pop();
+      if (current instanceof StorageGroupMNode) {
+        ret.add((StorageGroupMNode) current);
+      } else {
+        nodeStack.addAll(current.getChildren().values());
+      }
+    }
+    return ret;
+  }
+
+  /**
+   * Get storage group path by path
+   *
+   * <p>e.g., root.sg1 is storage group, path is root.sg1.d1, return root.sg1
+   *
+   * @return storage group in the given path
+   */
+  PartialPath getStorageGroupPath(PartialPath path) throws StorageGroupNotSetException {
+    String[] nodes = path.getNodes();
+    MNode cur = root;
+    for (int i = 1; i < nodes.length; i++) {
+      cur = cur.getChild(nodes[i]);
+      if (cur instanceof StorageGroupMNode) {
+        return cur.getPartialPath();
+      } else if (cur == null) {
+        throw new StorageGroupNotSetException(path.getFullPath());
+      }
+    }
+    throw new StorageGroupNotSetException(path.getFullPath());
+  }
+
+  /**
+   * Check whether the given path contains a storage group
+   */
+  boolean checkStorageGroupByPath(PartialPath path) {
+    String[] nodes = path.getNodes();
+    MNode cur = root;
+    for (int i = 1; i <= nodes.length; i++) {
+      cur = cur.getChild(nodes[i]);
+      if (cur == null) {
+        return false;
+      } else if (cur instanceof StorageGroupMNode) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Get all timeseries under the given path
+   *
+   * @param prefixPath a prefix path or a full path, may contain '*'.
+   */
+  List<PartialPath> getAllTimeseriesPath(PartialPath prefixPath) throws MetadataException {
+    ShowTimeSeriesPlan plan = new ShowTimeSeriesPlan(prefixPath);
+    List<Pair<PartialPath, String[]>> res = getAllMeasurementSchema(plan);
+    List<PartialPath> paths = new ArrayList<>();
+    for (Pair<PartialPath, String[]> p : res) {
+      paths.add(p.left);
+    }
+    return paths;
+  }
+
+  /**
+   * Get all timeseries paths under the given path
+   *
+   * @param prefixPath a prefix path or a full path, may contain '*'.
+   */
+  List<PartialPath> getAllTimeseriesPathWithAlias(PartialPath prefixPath) throws MetadataException {
+    PartialPath prePath = new PartialPath(prefixPath.getNodes());
+    ShowTimeSeriesPlan plan = new ShowTimeSeriesPlan(prefixPath);
+    List<Pair<PartialPath, String[]>> res = getAllMeasurementSchema(plan);
+    List<PartialPath> paths = new ArrayList<>();
+    for (Pair<PartialPath, String[]> p : res) {
+      if (prePath.getMeasurement().equals(p.right[0])) {
+        p.left.setMeasurementAlias(p.right[0]);
+      }
+      paths.add(p.left);
+    }
+    return paths;
+  }
+
+  /**
+   * Get the count of timeseries under the given prefix path.
+   *
+   * @param prefixPath a prefix path or a full path, may contain '*'.
+   */
+  int getAllTimeseriesCount(PartialPath prefixPath) throws MetadataException {
+    String[] nodes = prefixPath.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(prefixPath.getFullPath());
+    }
+    return getCount(root, nodes, 1);
+  }
+
+  /**
+   * Get the count of devices under the given prefix path.
+   *
+   * @param prefixPath a prefix path or a full path, may contain '*'.
+   */
+  int getDevicesNum(PartialPath prefixPath) throws MetadataException {
+    String[] nodes = prefixPath.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(prefixPath.getFullPath());
+    }
+    return getDevicesCount(root, nodes, 1);
+  }
+
+  /**
+   * Get the count of storage group under the given prefix path.
+   *
+   * @param prefixPath a prefix path or a full path, may contain '*'.
+   */
+  int getStorageGroupNum(PartialPath prefixPath) throws MetadataException {
+    String[] nodes = prefixPath.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(prefixPath.getFullPath());
+    }
+    return getStorageGroupCount(root, nodes, 1, "");
+  }
+
+  /**
+   * Get the count of nodes in the given level under the given prefix path.
+   */
+  int getNodesCountInGivenLevel(PartialPath prefixPath, int level) throws MetadataException {
+    String[] nodes = prefixPath.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(prefixPath.getFullPath());
+    }
+    MNode node = root;
+    for (int i = 1; i < nodes.length; i++) {
+      if (node.getChild(nodes[i]) != null) {
+        node = node.getChild(nodes[i]);
+      } else {
+        throw new MetadataException(nodes[i - 1] + " does not have the child node " + nodes[i]);
+      }
+    }
+    return getCountInGivenLevel(node, level - (nodes.length - 1));
+  }
+
+  /**
+   * Traverse the MTree to get the count of timeseries.
+   */
+  private int getCount(MNode node, String[] nodes, int idx) throws MetadataException {
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!(PATH_WILDCARD).equals(nodeReg)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        if (next instanceof MeasurementMNode) {
+          return 1;
+        } else {
+          return getCount(next, nodes, idx + 1);
+        }
+      } else {
+        throw new MetadataException(node.getName() + " does not have the child node " + nodeReg);
+      }
+    } else {
+      int cnt = 0;
+      for (MNode child : node.getChildren().values()) {
+        if (child instanceof MeasurementMNode) {
+          cnt++;
+        }
+        cnt += getCount(child, nodes, idx + 1);
+      }
+      return cnt;
+    }
+  }
+
+  /**
+   * Traverse the MTree to get the count of devices.
+   */
+  private int getDevicesCount(MNode node, String[] nodes, int idx) throws MetadataException {
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    int cnt = 0;
+    if (!(PATH_WILDCARD).equals(nodeReg)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        if (next instanceof MeasurementMNode && idx >= nodes.length) {
+          cnt++;
+        } else {
+          cnt += getDevicesCount(node.getChild(nodeReg), nodes, idx + 1);
+        }
+      }
+    } else {
+      boolean deviceAdded = false;
+      for (MNode child : node.getChildren().values()) {
+        if (child instanceof MeasurementMNode && !deviceAdded && idx >= nodes.length) {
+          cnt++;
+          deviceAdded = true;
+        }
+        cnt += getDevicesCount(child, nodes, idx + 1);
+      }
+    }
+    return cnt;
+  }
+
+  /**
+   * Traverse the MTree to get the count of storage group.
+   */
+  private int getStorageGroupCount(
+      MNode node, String[] nodes, int idx, String parent) throws MetadataException {
+    int cnt = 0;
+    if (node instanceof StorageGroupMNode && idx >= nodes.length) {
+      cnt++;
+      return cnt;
+    }
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!(PATH_WILDCARD).equals(nodeReg)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        cnt += getStorageGroupCount(next,
+            nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR);
+      }
+    } else {
+      for (MNode child : node.getChildren().values()) {
+        cnt += getStorageGroupCount(
+            child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR);
+      }
+    }
+    return cnt;
+  }
+
+  /**
+   * Traverse the MTree to get the count of timeseries in the given level.
+   *
+   * @param targetLevel Record the distance to the target level, 0 means the target level.
+   */
+  private int getCountInGivenLevel(MNode node, int targetLevel) {
+    if (targetLevel == 0) {
+      return 1;
+    }
+    int cnt = 0;
+    for (MNode child : node.getChildren().values()) {
+      cnt += getCountInGivenLevel(child, targetLevel - 1);
+    }
+    return cnt;
+  }
+
+  /**
+   * Get all time series schema under the given path order by insert frequency
+   *
+   * <p>result: [name, alias, storage group, dataType, encoding, compression, offset]
+   */
+  List<Pair<PartialPath, String[]>> getAllMeasurementSchemaByHeatOrder(ShowTimeSeriesPlan plan,
+      QueryContext queryContext) throws MetadataException {
+    String[] nodes = plan.getPath().getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(plan.getPath().getFullPath());
+    }
+    List<Pair<PartialPath, String[]>> allMatchedNodes = new ArrayList<>();
+
+    findPath(root, nodes, 1, allMatchedNodes, false, true, queryContext);
+
+    Stream<Pair<PartialPath, String[]>> sortedStream = allMatchedNodes.stream().sorted(
+        Comparator.comparingLong((Pair<PartialPath, String[]> p) -> Long.parseLong(p.right[6]))
+            .reversed()
+            .thenComparing((Pair<PartialPath, String[]> p) -> p.left));
+
+    // no limit
+    if (plan.getLimit() == 0) {
+      return sortedStream.collect(toList());
+    } else {
+      return sortedStream.skip(plan.getOffset()).limit(plan.getLimit()).collect(toList());
+    }
+  }
+
+  /**
+   * Get all time series schema under the given path
+   *
+   * <p>result: [name, alias, storage group, dataType, encoding, compression, offset]
+   */
+  List<Pair<PartialPath, String[]>> getAllMeasurementSchema(ShowTimeSeriesPlan plan)
+      throws MetadataException {
+    List<Pair<PartialPath, String[]>> res;
+    String[] nodes = plan.getPath().getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(plan.getPath().getFullPath());
+    }
+    limit.set(plan.getLimit());
+    offset.set(plan.getOffset());
+    curOffset.set(-1);
+    count.set(0);
+    if (offset.get() != 0 || limit.get() != 0) {
+      res = new LinkedList<>();
+      findPath(root, nodes, 1, res, true, false, null);
+    } else {
+      res = new LinkedList<>();
+      findPath(root, nodes, 1, res, false, false, null);
+    }
+    // avoid memory leaks
+    limit.remove();
+    offset.remove();
+    curOffset.remove();
+    count.remove();
+    return res;
+  }
+
+  /**
+   * Iterate through MTree to fetch metadata info of all leaf nodes under the given seriesPath
+   *
+   * @param needLast             if false, lastTimeStamp in timeseriesSchemaList will be null
+   * @param timeseriesSchemaList List<timeseriesSchema> result: [name, alias, storage group,
+   *                             dataType, encoding, compression, offset, lastTimeStamp]
+   */
+  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
+  private void findPath(MNode node, String[] nodes, int idx,
+      List<Pair<PartialPath, String[]>> timeseriesSchemaList,
+      boolean hasLimit, boolean needLast, QueryContext queryContext) throws MetadataException {
+    if (node instanceof MeasurementMNode && nodes.length <= idx) {
+      if (hasLimit) {
+        curOffset.set(curOffset.get() + 1);
+        if (curOffset.get() < offset.get() || count.get().intValue() == limit.get().intValue()) {
+          return;
+        }
+      }
+
+      PartialPath nodePath = node.getPartialPath();
+      String[] tsRow = new String[7];
+      tsRow[0] = ((MeasurementMNode) node).getAlias();
+      MeasurementSchema measurementSchema = ((MeasurementMNode) node).getSchema();
+      tsRow[1] = getStorageGroupPath(nodePath).getFullPath();
+      tsRow[2] = measurementSchema.getType().toString();
+      tsRow[3] = measurementSchema.getEncodingType().toString();
+      tsRow[4] = measurementSchema.getCompressor().toString();
+      tsRow[5] = String.valueOf(((MeasurementMNode) node).getOffset());
+      tsRow[6] =
+          needLast ? String.valueOf(getLastTimeStamp((MeasurementMNode) node, queryContext)) : null;
+      Pair<PartialPath, String[]> temp = new Pair<>(nodePath, tsRow);
+      timeseriesSchemaList.add(temp);
+
+      if (hasLimit) {
+        count.set(count.get() + 1);
+      }
+    }
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!nodeReg.contains(PATH_WILDCARD)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        findPath(next, nodes, idx + 1, timeseriesSchemaList, hasLimit, needLast,
+            queryContext);
+      }
+    } else {
+      for (MNode child : node.getChildren().values()) {
+        if (!Pattern.matches(nodeReg.replace("*", ".*"), child.getName())) {
+          continue;
+        }
+        findPath(child, nodes, idx + 1, timeseriesSchemaList, hasLimit, needLast, queryContext);
+        if (hasLimit) {
+          if (count.get().intValue() == limit.get().intValue()) {
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Get child node path in the next level of the given path.
+   *
+   * <p>e.g., MTree has [root.sg1.d1.s1, root.sg1.d1.s2, root.sg1.d2.s1] given path = root.sg1,
+   * return [root.sg1.d1, root.sg1.d2]
+   *
+   * @return All child nodes' seriesPath(s) of given seriesPath.
+   */
+  Set<String> getChildNodePathInNextLevel(PartialPath path) throws MetadataException {
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    Set<String> childNodePaths = new TreeSet<>();
+    findChildNodePathInNextLevel(root, nodes, 1, "", childNodePaths, nodes.length + 1);
+    return childNodePaths;
+  }
+
+  /**
+   * Traverse the MTree to match all child node path in next level
+   *
+   * @param node   the current traversing node
+   * @param nodes  split the prefix path with '.'
+   * @param idx    the current index of array nodes
+   * @param parent store the node string having traversed
+   * @param res    store all matched device names
+   * @param length expected length of path
+   */
+  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
+  private void findChildNodePathInNextLevel(
+      MNode node, String[] nodes, int idx, String parent, Set<String> res, int length) {
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!nodeReg.contains(PATH_WILDCARD)) {
+      if (idx == length) {
+        res.add(parent + node.getName());
+      } else {
+        findChildNodePathInNextLevel(node.getChild(nodeReg), nodes, idx + 1,
+            parent + node.getName() + PATH_SEPARATOR, res, length);
+      }
+    } else {
+      if (node.getChildren().size() > 0) {
+        for (MNode child : node.getChildren().values()) {
+          if (!Pattern.matches(nodeReg.replace("*", ".*"), child.getName())) {
+            continue;
+          }
+          if (idx == length) {
+            res.add(parent + node.getName());
+          } else {
+            findChildNodePathInNextLevel(
+                child, nodes, idx + 1, parent + node.getName() + PATH_SEPARATOR, res, length);
+          }
+        }
+      } else if (idx == length) {
+        String nodeName;
+        nodeName = node.getName();
+        res.add(parent + nodeName);
+      }
+    }
+  }
+
+  /**
+   * Get all devices under give path
+   *
+   * @return a list contains all distinct devices names
+   */
+  Set<PartialPath> getDevices(PartialPath prefixPath) throws MetadataException {
+    String[] nodes = prefixPath.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(prefixPath.getFullPath());
+    }
+    Set<PartialPath> devices = new TreeSet<>();
+    findDevices(root, nodes, 1, devices);
+    return devices;
+  }
+
+  /**
+   * Traverse the MTree to match all devices with prefix path.
+   *
+   * @param node  the current traversing node
+   * @param nodes split the prefix path with '.'
+   * @param idx   the current index of array nodes
+   * @param res   store all matched device names
+   */
+  private void findDevices(MNode node, String[] nodes, int idx, Set<PartialPath> res) {
+    String nodeReg = MetaUtils.getNodeRegByIdx(idx, nodes);
+    if (!(PATH_WILDCARD).equals(nodeReg)) {
+      MNode next = node.getChild(nodeReg);
+      if (next != null) {
+        if (next instanceof MeasurementMNode && idx >= nodes.length) {
+          res.add(node.getPartialPath());
+        } else {
+          findDevices(next, nodes, idx + 1, res);
+        }
+      }
+    } else {
+      boolean deviceAdded = false;
+      for (MNode child : node.getChildren().values()) {
+        if (child instanceof MeasurementMNode && !deviceAdded && idx >= nodes.length) {
+          res.add(node.getPartialPath());
+          deviceAdded = true;
+        }
+        findDevices(child, nodes, idx + 1, res);
+      }
+    }
+  }
+
+  /**
+   * Get all paths from root to the given level.
+   */
+  List<PartialPath> getNodesList(PartialPath path, int nodeLevel) throws MetadataException {
+    return getNodesList(path, nodeLevel, null);
+  }
+
+  /**
+   * Get all paths from root to the given level
+   */
+  List<PartialPath> getNodesList(PartialPath path, int nodeLevel, StorageGroupFilter filter)
+      throws MetadataException {
+    String[] nodes = path.getNodes();
+    if (!nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+    List<PartialPath> res = new ArrayList<>();
+    MNode node = root;
+    for (int i = 1; i < nodes.length; i++) {
+      if (node.getChild(nodes[i]) != null) {
+        node = node.getChild(nodes[i]);
+        if (node instanceof StorageGroupMNode && filter != null && !filter
+            .satisfy(node.getFullPath())) {
+          return res;
+        }
+      } else {
+        throw new MetadataException(nodes[i - 1] + " does not have the child node " + nodes[i]);
+      }
+    }
+    findNodes(node, path, res, nodeLevel - (nodes.length - 1), filter);
+    return res;
+  }
+
+  /**
+   * Get all paths under the given level.
+   *
+   * @param targetLevel Record the distance to the target level, 0 means the target level.
+   */
+  private void findNodes(MNode node, PartialPath path, List<PartialPath> res, int targetLevel,
+      StorageGroupFilter filter) {
+    if (node == null || node instanceof StorageGroupMNode && filter != null && !filter
+        .satisfy(node.getFullPath())) {
+      return;
+    }
+    if (targetLevel == 0) {
+      res.add(path);
+      return;
+    }
+    for (MNode child : node.getChildren().values()) {
+      findNodes(child, path.concatNode(child.toString()), res, targetLevel - 1, filter);
+    }
+  }
+
+  public void serializeTo(String snapshotPath) throws IOException {
+    try (BufferedWriter bw = new BufferedWriter(
+        new FileWriter(SystemFileFactory.INSTANCE.getFile(snapshotPath)))) {
+      root.serializeTo(bw);
+    }
+  }
+
+  @Override
+  public String toString() {
+    JsonObject jsonObject = new JsonObject();
+    jsonObject.add(root.getName(), mNodeToJSON(root, null));
+    return jsonToString(jsonObject);
+  }
+
+  private JsonObject mNodeToJSON(MNode node, String storageGroupName) {
+    JsonObject jsonObject = new JsonObject();
+    if (node.getChildren().size() > 0) {
+      if (node instanceof StorageGroupMNode) {
+        storageGroupName = node.getFullPath();
+      }
+      for (MNode child : node.getChildren().values()) {
+        jsonObject.add(child.getName(), mNodeToJSON(child, storageGroupName));
+      }
+    } else if (node instanceof MeasurementMNode) {
+      MeasurementMNode leafMNode = (MeasurementMNode) node;
+      jsonObject.add("DataType", GSON.toJsonTree(leafMNode.getSchema().getType()));
+      jsonObject.add("Encoding", GSON.toJsonTree(leafMNode.getSchema().getEncodingType()));
+      jsonObject.add("Compressor", GSON.toJsonTree(leafMNode.getSchema().getCompressor()));
+      if (leafMNode.getSchema().getProps() != null) {
+        jsonObject.addProperty("args", leafMNode.getSchema().getProps().toString());
+      }
+      jsonObject.addProperty("StorageGroup", storageGroupName);
+    }
+    return jsonObject;
+  }
+
+  Map<String, String> determineStorageGroup(PartialPath path) throws IllegalPathException {
+    Map<String, String> paths = new HashMap<>();
+    String[] nodes = path.getNodes();
+    if (nodes.length == 0 || !nodes[0].equals(root.getName())) {
+      throw new IllegalPathException(path.getFullPath());
+    }
+
+    Deque<MNode> nodeStack = new ArrayDeque<>();
+    Deque<Integer> depthStack = new ArrayDeque<>();
+    if (!root.getChildren().isEmpty()) {
+      nodeStack.push(root);
+      depthStack.push(0);
+    }
+
+    while (!nodeStack.isEmpty()) {
+      MNode mNode = nodeStack.removeFirst();
+      int depth = depthStack.removeFirst();
+
+      determineStorageGroup(depth + 1, nodes, mNode, paths, nodeStack, depthStack);
+    }
+    return paths;
+  }
+
+  /**
+   * Try determining the storage group using the children of a mNode. If one child is a storage
+   * group node, put a storageGroupName-fullPath pair into paths. Otherwise put the children that
+   * match the path into the queue and discard other children.
+   */
+  private void determineStorageGroup(
+      int depth,
+      String[] nodes,
+      MNode mNode,
+      Map<String, String> paths,
+      Deque<MNode> nodeStack,
+      Deque<Integer> depthStack) {
+    String currNode = depth >= nodes.length ? PATH_WILDCARD : nodes[depth];
+    for (Entry<String, MNode> entry : mNode.getChildren().entrySet()) {
+      if (!currNode.equals(PATH_WILDCARD) && !currNode.equals(entry.getKey())) {
+        continue;
+      }
+      // this child is desired
+      MNode child = entry.getValue();
+      if (child instanceof StorageGroupMNode) {
+        // we have found one storage group, record it
+        String sgName = child.getFullPath();
+        // concat the remaining path with the storage group name
+        StringBuilder pathWithKnownSG = new StringBuilder(sgName);
+        for (int i = depth + 1; i < nodes.length; i++) {
+          pathWithKnownSG.append(IoTDBConstant.PATH_SEPARATOR).append(nodes[i]);
+        }
+        if (depth >= nodes.length - 1 && currNode.equals(PATH_WILDCARD)) {
+          // the we find the sg at the last node and the last node is a wildcard (find "root
+          // .group1", for "root.*"), also append the wildcard (to make "root.group1.*")
+          pathWithKnownSG.append(IoTDBConstant.PATH_SEPARATOR).append(PATH_WILDCARD);
+        }
+        paths.put(sgName, pathWithKnownSG.toString());
+      } else if (!child.getChildren().isEmpty()) {
+        // push it back so we can traver its children later
+        nodeStack.push(child);
+        depthStack.push(depth);
+      }
+    }
   }
 }

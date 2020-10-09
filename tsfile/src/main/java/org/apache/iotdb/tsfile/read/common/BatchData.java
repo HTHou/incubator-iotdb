@@ -18,62 +18,67 @@
  */
 package org.apache.iotdb.tsfile.read.common;
 
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.BiPredicate;
 import org.apache.iotdb.tsfile.common.conf.TSFileConfig;
 import org.apache.iotdb.tsfile.exception.write.UnSupportedDataTypeException;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
+import org.apache.iotdb.tsfile.read.TimeValuePair;
+import org.apache.iotdb.tsfile.read.reader.BatchDataIterator;
 import org.apache.iotdb.tsfile.utils.Binary;
 import org.apache.iotdb.tsfile.utils.TsPrimitiveType;
-import org.apache.iotdb.tsfile.utils.TsPrimitiveType.*;
-
-import java.io.Serializable;
-import java.util.ArrayList;
+import org.apache.iotdb.tsfile.utils.TsPrimitiveType.TsBinary;
+import org.apache.iotdb.tsfile.utils.TsPrimitiveType.TsBoolean;
+import org.apache.iotdb.tsfile.utils.TsPrimitiveType.TsDouble;
+import org.apache.iotdb.tsfile.utils.TsPrimitiveType.TsFloat;
+import org.apache.iotdb.tsfile.utils.TsPrimitiveType.TsInt;
+import org.apache.iotdb.tsfile.utils.TsPrimitiveType.TsLong;
 
 /**
  * <code>BatchData</code> is a self-defined data structure which is optimized for different type of
  * values. This class can be viewed as a collection which is more efficient than ArrayList.
- *
+ * <p>
  * This class records a time list and a value list, which could be replaced by TVList in the future
- *
- * When you use BatchData in query process, it does not contain duplicated timestamps. The batch data
- * may be empty.
- *
+ * <p>
+ * When you use BatchData in query process, it does not contain duplicated timestamps. The batch
+ * data may be empty.
+ * <p>
  * If you get a batch data, you can iterate the data as the following codes:
- *
- * while (batchData.hasCurrent()) {
- *   long time = batchData.currentTime();
- *   Object value = batchData.currentValue();
- *   batchData.next();
- * }
+ * <p>
+ * while (batchData.hasCurrent()) { long time = batchData.currentTime(); Object value =
+ * batchData.currentValue(); batchData.next(); }
  */
 public class BatchData implements Serializable {
 
   private static final long serialVersionUID = -4620310601188394839L;
-  private int capacity = 16;
-  private int capacityThreshold = 1024;
+  private static final int capacityThreshold = TSFileConfig.ARRAY_CAPACITY_THRESHOLD;
+  protected int capacity = 16;
 
-  private TSDataType dataType;
+  protected TSDataType dataType;
 
   // outer list index for read
-  private int readCurListIndex;
+  protected int readCurListIndex;
   // inner array index for read
-  private int readCurArrayIndex;
+  protected int readCurArrayIndex;
 
   // outer list index for write
-  private int writeCurListIndex;
+  protected int writeCurListIndex;
   // inner array index for write
-  private int writeCurArrayIndex;
+  protected int writeCurArrayIndex;
 
   // the insert timestamp number of timeRet
   private int count;
 
 
-  private ArrayList<long[]> timeRet;
-  private ArrayList<boolean[]> booleanRet;
-  private ArrayList<int[]> intRet;
-  private ArrayList<long[]> longRet;
-  private ArrayList<float[]> floatRet;
-  private ArrayList<double[]> doubleRet;
-  private ArrayList<Binary[]> binaryRet;
+  private List<long[]> timeRet;
+  private List<boolean[]> booleanRet;
+  private List<int[]> intRet;
+  private List<long[]> longRet;
+  private List<float[]> floatRet;
+  private List<double[]> doubleRet;
+  private List<Binary[]> binaryRet;
 
   public BatchData() {
     dataType = null;
@@ -93,15 +98,11 @@ public class BatchData implements Serializable {
   }
 
   public boolean hasCurrent() {
-    if (readCurListIndex < writeCurListIndex) {
-      return readCurArrayIndex < capacity;
-    }
-    else if (readCurListIndex == writeCurListIndex) {
+    if (readCurListIndex == writeCurListIndex) {
       return readCurArrayIndex < writeCurArrayIndex;
     }
-    else {
-      return false;
-    }
+
+    return readCurListIndex < writeCurListIndex && readCurArrayIndex < capacity;
   }
 
   public void next() {
@@ -174,7 +175,6 @@ public class BatchData implements Serializable {
     this.readCurArrayIndex = 0;
     this.writeCurListIndex = 0;
     this.writeCurArrayIndex = 0;
-    capacityThreshold = TSFileConfig.DYNAMIC_DATA_SIZE;
 
     timeRet = new ArrayList<>();
     timeRet.add(new long[capacity]);
@@ -224,17 +224,23 @@ public class BatchData implements Serializable {
         writeCurListIndex++;
         writeCurArrayIndex = 0;
       } else {
-        long[] newTimeData = new long[capacity * 2];
+        int newCapacity = capacity << 1;
+
+        long[] newTimeData = new long[newCapacity];
+        boolean[] newValueData = new boolean[newCapacity];
+
         System.arraycopy(timeRet.get(0), 0, newTimeData, 0, capacity);
-        timeRet.set(0, newTimeData);
-        boolean[] newValueData = new boolean[capacity * 2];
         System.arraycopy(booleanRet.get(0), 0, newValueData, 0, capacity);
+
+        timeRet.set(0, newTimeData);
         booleanRet.set(0, newValueData);
-        capacity = capacity * 2;
+
+        capacity = newCapacity;
       }
     }
-    (timeRet.get(writeCurListIndex))[writeCurArrayIndex] = t;
-    (booleanRet.get(writeCurListIndex))[writeCurArrayIndex] = v;
+    timeRet.get(writeCurListIndex)[writeCurArrayIndex] = t;
+    booleanRet.get(writeCurListIndex)[writeCurArrayIndex] = v;
+
     writeCurArrayIndex++;
     count++;
   }
@@ -253,17 +259,23 @@ public class BatchData implements Serializable {
         writeCurListIndex++;
         writeCurArrayIndex = 0;
       } else {
-        long[] newTimeData = new long[capacity * 2];
+        int newCapacity = capacity << 1;
+
+        long[] newTimeData = new long[newCapacity];
+        int[] newValueData = new int[newCapacity];
+
         System.arraycopy(timeRet.get(0), 0, newTimeData, 0, capacity);
-        timeRet.set(0, newTimeData);
-        int[] newValueData = new int[capacity * 2];
         System.arraycopy(intRet.get(0), 0, newValueData, 0, capacity);
+
+        timeRet.set(0, newTimeData);
         intRet.set(0, newValueData);
-        capacity = capacity * 2;
+
+        capacity = newCapacity;
       }
     }
-    (timeRet.get(writeCurListIndex))[writeCurArrayIndex] = t;
-    (intRet.get(writeCurListIndex))[writeCurArrayIndex] = v;
+    timeRet.get(writeCurListIndex)[writeCurArrayIndex] = t;
+    intRet.get(writeCurListIndex)[writeCurArrayIndex] = v;
+
     writeCurArrayIndex++;
     count++;
   }
@@ -282,17 +294,23 @@ public class BatchData implements Serializable {
         writeCurListIndex++;
         writeCurArrayIndex = 0;
       } else {
-        long[] newTimeData = new long[capacity * 2];
+        int newCapacity = capacity << 1;
+
+        long[] newTimeData = new long[newCapacity];
+        long[] newValueData = new long[newCapacity];
+
         System.arraycopy(timeRet.get(0), 0, newTimeData, 0, capacity);
-        timeRet.set(0, newTimeData);
-        long[] newValueData = new long[capacity * 2];
         System.arraycopy(longRet.get(0), 0, newValueData, 0, capacity);
+
+        timeRet.set(0, newTimeData);
         longRet.set(0, newValueData);
-        capacity = capacity * 2;
+
+        capacity = newCapacity;
       }
     }
-    (timeRet.get(writeCurListIndex))[writeCurArrayIndex] = t;
-    (longRet.get(writeCurListIndex))[writeCurArrayIndex] = v;
+    timeRet.get(writeCurListIndex)[writeCurArrayIndex] = t;
+    longRet.get(writeCurListIndex)[writeCurArrayIndex] = v;
+
     writeCurArrayIndex++;
     count++;
   }
@@ -311,17 +329,23 @@ public class BatchData implements Serializable {
         writeCurListIndex++;
         writeCurArrayIndex = 0;
       } else {
-        long[] newTimeData = new long[capacity * 2];
+        int newCapacity = capacity << 1;
+
+        long[] newTimeData = new long[newCapacity];
+        float[] newValueData = new float[newCapacity];
+
         System.arraycopy(timeRet.get(0), 0, newTimeData, 0, capacity);
-        timeRet.set(0, newTimeData);
-        float[] newValueData = new float[capacity * 2];
         System.arraycopy(floatRet.get(0), 0, newValueData, 0, capacity);
+
+        timeRet.set(0, newTimeData);
         floatRet.set(0, newValueData);
-        capacity = capacity * 2;
+
+        capacity = newCapacity;
       }
     }
-    (timeRet.get(writeCurListIndex))[writeCurArrayIndex] = t;
-    (floatRet.get(writeCurListIndex))[writeCurArrayIndex] = v;
+    timeRet.get(writeCurListIndex)[writeCurArrayIndex] = t;
+    floatRet.get(writeCurListIndex)[writeCurArrayIndex] = v;
+
     writeCurArrayIndex++;
     count++;
   }
@@ -340,17 +364,22 @@ public class BatchData implements Serializable {
         writeCurListIndex++;
         writeCurArrayIndex = 0;
       } else {
-        long[] newTimeData = new long[capacity * 2];
+        int newCapacity = capacity << 1;
+
+        long[] newTimeData = new long[newCapacity];
+        double[] newValueData = new double[newCapacity];
+
         System.arraycopy(timeRet.get(0), 0, newTimeData, 0, capacity);
-        timeRet.set(0, newTimeData);
-        double[] newValueData = new double[capacity * 2];
         System.arraycopy(doubleRet.get(0), 0, newValueData, 0, capacity);
+
+        timeRet.set(0, newTimeData);
         doubleRet.set(0, newValueData);
-        capacity = capacity * 2;
+        capacity = newCapacity;
       }
     }
-    (timeRet.get(writeCurListIndex))[writeCurArrayIndex] = t;
-    (doubleRet.get(writeCurListIndex))[writeCurArrayIndex] = v;
+    timeRet.get(writeCurListIndex)[writeCurArrayIndex] = t;
+    doubleRet.get(writeCurListIndex)[writeCurArrayIndex] = v;
+
     writeCurArrayIndex++;
     count++;
   }
@@ -369,21 +398,26 @@ public class BatchData implements Serializable {
         writeCurListIndex++;
         writeCurArrayIndex = 0;
       } else {
-        long[] newTimeData = new long[capacity * 2];
+        int newCapacity = capacity << 1;
+
+        long[] newTimeData = new long[newCapacity];
+        Binary[] newValueData = new Binary[newCapacity];
+
         System.arraycopy(timeRet.get(0), 0, newTimeData, 0, capacity);
-        timeRet.set(0, newTimeData);
-        Binary[] newValueData = new Binary[capacity * 2];
         System.arraycopy(binaryRet.get(0), 0, newValueData, 0, capacity);
+
+        timeRet.set(0, newTimeData);
         binaryRet.set(0, newValueData);
-        capacity = capacity * 2;
+
+        capacity = newCapacity;
       }
     }
-    (timeRet.get(writeCurListIndex))[writeCurArrayIndex] = t;
-    (binaryRet.get(writeCurListIndex))[writeCurArrayIndex] = v;
+    timeRet.get(writeCurListIndex)[writeCurArrayIndex] = t;
+    binaryRet.get(writeCurListIndex)[writeCurArrayIndex] = v;
+
     writeCurArrayIndex++;
     count++;
   }
-
 
 
   public boolean getBoolean() {
@@ -501,6 +535,17 @@ public class BatchData implements Serializable {
     return booleanRet.get(idx / capacity)[idx % capacity];
   }
 
+  public TimeValuePair getLastPairBeforeOrEqualTimestamp(long queryTime) {
+    TimeValuePair resultPair = new TimeValuePair(Long.MIN_VALUE, null);
+    resetBatchData();
+    while (hasCurrent() && (currentTime() <= queryTime)) {
+      resultPair.setTimestamp(currentTime());
+      resultPair.setValue(currentTsPrimitiveType());
+      next();
+    }
+    return resultPair;
+  }
+
   public Object getValueInTimestamp(long time) {
     while (hasCurrent()) {
       if (currentTime() < time) {
@@ -514,5 +559,62 @@ public class BatchData implements Serializable {
       }
     }
     return null;
+  }
+
+  public Object getValueInTimestamp(long time, BiPredicate<Long, Long> compare) {
+    while (hasCurrent()) {
+      if (compare.test(currentTime(), time)) {
+        next();
+      } else if (currentTime() == time) {
+        Object value = currentValue();
+        next();
+        return value;
+      } else {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  public long getMaxTimestamp() {
+    return getTimeByIndex(length() - 1);
+  }
+
+  public long getMinTimestamp() {
+    return getTimeByIndex(0);
+  }
+
+  public BatchDataIterator getBatchDataIterator() {
+    return new BatchDataIterator(this);
+  }
+
+  /**
+   * This method is used to reset batch data when more than one group by aggregation functions visit
+   * the same batch data
+   */
+  public void resetBatchData() {
+    this.readCurArrayIndex = 0;
+    this.readCurListIndex = 0;
+  }
+
+  public void resetBatchData(int readCurArrayIndex, int readCurListIndex) {
+    this.readCurArrayIndex = readCurArrayIndex;
+    this.readCurListIndex = readCurListIndex;
+  }
+
+  public int getReadCurListIndex() {
+    return readCurListIndex;
+  }
+
+  public int getReadCurArrayIndex() {
+    return readCurArrayIndex;
+  }
+
+  /**
+   * When put data, the writeIndex increases while the readIndex remains 0. For ascending read, we
+   * could read from 0 to writeIndex. So no need to flip.
+   */
+  public BatchData flip() {
+    return this;
   }
 }

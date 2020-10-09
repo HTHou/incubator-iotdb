@@ -18,22 +18,26 @@
  */
 package org.apache.iotdb.db.qp.physical.sys;
 
+import org.apache.iotdb.db.metadata.PartialPath;
 import org.apache.iotdb.tsfile.read.common.Path;
 
 /**
  * CountPlan is used to count time-series and count nodes.
+ * COUNT_TIMESERIES if  using "COUNT TIMESERIES <Path>" and only this command supports wildcard.
+ * COUNT_NODE_TIMESERIES if using "COUNT TIMESERIES <Path> GROUP BY LEVEL=<INTEGER>"
+ * COUNT_NODE if using "COUNT NODES <Path> LEVEL=<INTEGER>"
  */
 public class CountPlan extends ShowPlan {
 
-  private Path path;
+  private PartialPath path;
   private int level;
 
-  public CountPlan(ShowContentType showContentType, Path path) {
+  public CountPlan(ShowContentType showContentType, PartialPath path) {
     super(showContentType);
     this.path = path;
   }
 
-  public CountPlan(ShowContentType showContentType, Path path, int level) {
+  public CountPlan(ShowContentType showContentType, PartialPath path, int level) {
     super(showContentType);
     this.path = path;
     this.level = level;
@@ -43,7 +47,7 @@ public class CountPlan extends ShowPlan {
     return level;
   }
 
-  public Path getPath() {
+  public PartialPath getPath() {
     return path;
   }
 }

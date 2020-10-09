@@ -18,13 +18,10 @@
  */
 package org.apache.iotdb.db.qp.constant;
 
-import org.apache.iotdb.tsfile.read.common.Path;
-
 import java.util.HashMap;
 import java.util.Map;
-
+import org.apache.iotdb.db.metadata.PartialPath;
 import org.apache.iotdb.db.qp.strategy.SqlBaseLexer;
-import org.apache.iotdb.tsfile.read.common.Path;
 
 /**
  * this class contains several constants used in SQL.
@@ -36,9 +33,11 @@ public class SQLConstant {
     // forbidding instantiation
   }
 
-  public static final String GROUPBY_DEVICE_COLUMN_NAME = "Device";
+  private static final String[] SINGLE_ROOT_ARRAY = new String[1];
+  private static final String[] SINGLE_TIME_ARRAY = new String[1];
+  public static final PartialPath TIME_PATH = new PartialPath(SINGLE_TIME_ARRAY);
+  public static final String ALIGNBY_DEVICE_COLUMN_NAME = "Device";
   public static final String RESERVED_TIME = "time";
-  public static final String RESERVED_FREQ = "freq";
   public static final String IS_AGGREGATION = "IS_AGGREGATION";
   public static final String NOW_FUNC = "now()";
   public static final String START_TIME_STR = "1970-1-01T00:00:00";
@@ -48,8 +47,8 @@ public class SQLConstant {
   public static final String METADATA_PARAM_EQUAL = "=";
   public static final String QUOTE = "'";
   public static final String DQUOTE = "\"";
-  public static final String BOOLEN_TRUE = "true";
-  public static final String BOOLEN_FALSE = "false";
+  public static final String BOOLEAN_TRUE = "true";
+  public static final String BOOLEAN_FALSE = "false";
   public static final String BOOLEAN_TRUE_NUM = "1";
   public static final String BOOLEAN_FALSE_NUM = "0";
 
@@ -63,9 +62,13 @@ public class SQLConstant {
   public static final String FIRST_VALUE = "first_value";
   public static final String LAST_VALUE = "last_value";
 
+  public static final String LAST = "last";
+
   public static final String COUNT = "count";
   public static final String AVG = "avg";
   public static final String SUM = "sum";
+
+  public static final String ALL = "all";
 
   public static final int KW_AND = 1;
   public static final int KW_OR = 2;
@@ -78,6 +81,7 @@ public class SQLConstant {
   public static final int GREATERTHANOREQUALTO = SqlBaseLexer.OPERATOR_GTE;
   public static final int GREATERTHAN = SqlBaseLexer.OPERATOR_GT;
   public static final int EQUAL_NS = SqlBaseLexer.OPERATOR_NEQ;
+  public static final int IN = SqlBaseLexer.OPERATOR_IN;
 
   public static final int TOK_SELECT = 21;
   public static final int TOK_FROM = 22;
@@ -137,11 +141,41 @@ public class SQLConstant {
   public static final int TOK_COUNT_NODE_TIMESERIES = 78;
   public static final int TOK_COUNT_NODES = 79;
 
+  public static final int TOK_METADATA_ALTER = 80;
+
+  public static final int TOK_FLUSH = 81;
+  public static final int TOK_MERGE = 82;
+  public static final int TOK_FULL_MERGE = 83;
+
+  public static final int TOK_CLEAR_CACHE = 84;
+
+  public static final int TOK_LOAD_CONFIGURATION_GLOBAL = 85;
+  public static final int TOK_LOAD_CONFIGURATION_LOCAL = 86;
+
+  public static final int TOK_SHOW_MERGE_STATUS = 87;
+  public static final int TOK_DELETE_PARTITION = 88;
+
+  public static final int TOK_CREATE_SCHEMA_SNAPSHOT = 89;
+  public static final int TOK_TRACING = 91;
+
+  public static final int TOK_COUNT_DEVICES = 92;
+  public static final int TOK_COUNT_STORAGE_GROUP = 93;
+
   public static final Map<Integer, String> tokenSymbol = new HashMap<>();
   public static final Map<Integer, String> tokenNames = new HashMap<>();
   public static final Map<Integer, Integer> reverseWords = new HashMap<>();
 
+  public static String[] getSingleRootArray() {
+    return SINGLE_ROOT_ARRAY;
+  }
+
+  public static String[] getSingleTimeArray() {
+    return SINGLE_TIME_ARRAY;
+  }
+
   static {
+    SINGLE_ROOT_ARRAY[0] = ROOT;
+    SINGLE_TIME_ARRAY[0] = RESERVED_TIME;
     tokenSymbol.put(KW_AND, "&");
     tokenSymbol.put(KW_OR, "|");
     tokenSymbol.put(KW_NOT, "!");
@@ -165,6 +199,7 @@ public class SQLConstant {
     tokenNames.put(LESSTHAN, "lessthan");
     tokenNames.put(GREATERTHANOREQUALTO, "greaterthan_or_equalto");
     tokenNames.put(GREATERTHAN, "greaterthan");
+    tokenNames.put(IN, "in");
 
     tokenNames.put(TOK_SELECT, "TOK_SELECT");
     tokenNames.put(TOK_FROM, "TOK_FROM");
@@ -203,6 +238,11 @@ public class SQLConstant {
     tokenNames.put(TOK_LOAD_FILES, "TOK_LOAD_FILES");
     tokenNames.put(TOK_REMOVE_FILE, "TOK_REMOVE_FILE");
     tokenNames.put(TOK_MOVE_FILE, "TOK_MOVE_FILE");
+
+    tokenNames.put(TOK_SHOW_MERGE_STATUS, "TOK_SHOW_MERGE_STATUS");
+    tokenNames.put(TOK_DELETE_PARTITION, "TOK_DELETE_PARTITION");
+
+    tokenNames.put(TOK_TRACING, "TOK_TRACING");
   }
 
   static {
@@ -216,8 +256,8 @@ public class SQLConstant {
     reverseWords.put(GREATERTHAN, LESSTHANOREQUALTO);
   }
 
-  public static boolean isReservedPath(Path pathStr) {
-    return pathStr.equals(SQLConstant.RESERVED_TIME) || pathStr.equals(SQLConstant.RESERVED_FREQ);
-
+  public static boolean isReservedPath(PartialPath pathStr) {
+    return pathStr.equals(TIME_PATH);
   }
+
 }

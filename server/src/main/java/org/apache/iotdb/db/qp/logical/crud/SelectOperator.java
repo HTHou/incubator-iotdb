@@ -20,16 +20,17 @@ package org.apache.iotdb.db.qp.logical.crud;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.iotdb.db.metadata.PartialPath;
 import org.apache.iotdb.db.qp.logical.Operator;
-import org.apache.iotdb.tsfile.read.common.Path;
 
 /**
  * this class maintains information from select clause.
  */
 public final class SelectOperator extends Operator {
 
-  private List<Path> suffixList;
+  private List<PartialPath> suffixList;
   private List<String> aggregations;
+  private boolean lastQuery;
 
   /**
    * init with tokenIntType, default operatorType is <code>OperatorType.SELECT</code>.
@@ -39,15 +40,20 @@ public final class SelectOperator extends Operator {
     operatorType = OperatorType.SELECT;
     suffixList = new ArrayList<>();
     aggregations = new ArrayList<>();
+    lastQuery = false;
   }
 
-  public void addSelectPath(Path suffixPath) {
+  public void addSelectPath(PartialPath suffixPath) {
     suffixList.add(suffixPath);
   }
 
-  public void addClusterPath(Path suffixPath, String aggregation) {
+  public void addClusterPath(PartialPath suffixPath, String aggregation) {
     suffixList.add(suffixPath);
     aggregations.add(aggregation);
+  }
+
+  public void setLastQuery() {
+    lastQuery = true;
   }
 
   public List<String> getAggregations() {
@@ -58,12 +64,13 @@ public final class SelectOperator extends Operator {
     this.aggregations = aggregations;
   }
 
-  public void setSuffixPathList(List<Path> suffixPaths) {
+  public void setSuffixPathList(List<PartialPath> suffixPaths) {
     suffixList = suffixPaths;
   }
 
-  public List<Path> getSuffixPaths() {
+  public List<PartialPath> getSuffixPaths() {
     return suffixList;
   }
 
+  public boolean isLastQuery() {return this.lastQuery; }
 }

@@ -430,7 +430,7 @@ public class DatetimeUtils {
         if (instant.getEpochSecond() < 0 && instant.getNano() > 0) {
           // adjustment can reduce the loss of the division
           long millis = Math.multiplyExact(instant.getEpochSecond() + 1, 1000_000);
-          long adjustment = instant.getNano() / 1000 - 1;
+          long adjustment = instant.getNano() / 1000 - 1L;
           return Math.addExact(millis, adjustment);
         } else {
           long millis = Math.multiplyExact(instant.getEpochSecond(), 1000_000);
@@ -464,6 +464,8 @@ public class DatetimeUtils {
     if (str.contains("Z")) {
       return convertDatetimeStrToLong(str.substring(0, str.indexOf('Z')) + "+00:00", offset,
           depth);
+    } else if (str.length() == 10) {
+      return convertDatetimeStrToLong(str + "T00:00:00", offset, depth);
     } else if (str.length() - str.lastIndexOf('+') != 6
         && str.length() - str.lastIndexOf('-') != 6) {
       return convertDatetimeStrToLong(str + offset, offset, depth + 1);
@@ -508,25 +510,25 @@ public class DatetimeUtils {
     }
 
     if (timestampPrecision.equals("us")) {
-      if (unit.equals(DurationUnit.ns)) {
+      if (unit.equals(DurationUnit.ns.toString())) {
         return value / 1000;
-      } else if (unit.equals(DurationUnit.us)) {
+      } else if (unit.equals(DurationUnit.us.toString())) {
         return value;
       } else {
         return res * 1000;
       }
     } else if (timestampPrecision.equals("ns")) {
-      if (unit.equals(DurationUnit.ns)) {
+      if (unit.equals(DurationUnit.ns.toString())) {
         return value;
-      } else if (unit.equals(DurationUnit.us)) {
+      } else if (unit.equals(DurationUnit.us.toString())) {
         return value * 1000;
       } else {
         return res * 1000_000;
       }
     } else {
-      if (unit.equals(DurationUnit.ns)) {
-        return value / 1000_0000;
-      } else if (unit.equals(DurationUnit.us)) {
+      if (unit.equals(DurationUnit.ns.toString())) {
+        return value / 1000_000;
+      } else if (unit.equals(DurationUnit.us.toString())) {
         return value / 1000;
       } else {
         return res;

@@ -18,39 +18,26 @@
  */
 package org.apache.iotdb.db.qp.physical.crud;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import org.apache.iotdb.db.exception.query.QueryProcessException;
-import org.apache.iotdb.db.qp.executor.IQueryProcessExecutor;
+import org.apache.iotdb.db.metadata.PartialPath;
 import org.apache.iotdb.db.qp.logical.Operator;
 import org.apache.iotdb.db.qp.physical.PhysicalPlan;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
-import org.apache.iotdb.tsfile.read.common.Path;
-import org.apache.iotdb.tsfile.read.expression.IExpression;
 
-public class QueryPlan extends PhysicalPlan {
+public abstract class QueryPlan extends PhysicalPlan {
 
-  private List<Path> paths = null;
+  protected List<PartialPath> paths = null;
   private List<TSDataType> dataTypes = null;
-
-  private List<Path> deduplicatedPaths = new ArrayList<>();
-  private List<TSDataType> deduplicatedDataTypes = new ArrayList<>();
-
-
-  private IExpression expression = null;
+  private boolean alignByTime = true; // for disable align sql
 
   private int rowLimit = 0;
   private int rowOffset = 0;
 
-  private boolean isGroupByDevice = false; // for group by device sql
-  private List<String> measurements; // for group by device sql, e.g. temperature
-  private Map<String, Set<String>> measurementsGroupByDevice; // for group by device sql, e.g. root.ln.d1 -> temperature
-  private Map<String, TSDataType> dataTypeConsistencyChecker; // for group by device sql, e.g. root.ln.d1.temperature -> Float
-  private Map<String, IExpression> deviceToFilterMap; // for group by device sql
-  private Map<Path, TSDataType> dataTypeMapping = new HashMap<>(); // for group by device sql
+  private boolean ascending = true;
+
+  private Map<String, Integer> pathToIndex = new HashMap<>();
 
   public QueryPlan() {
     super(true);
@@ -61,31 +48,12 @@ public class QueryPlan extends PhysicalPlan {
     super(isQuery, operatorType);
   }
 
-  /**
-   * Check if all paths exist.
-   */
-  public void checkPaths(IQueryProcessExecutor executor) throws QueryProcessException {
-    for (Path path : paths) {
-      if (!executor.judgePathExists(path)) {
-        throw new QueryProcessException("Path doesn't exist: " + path);
-      }
-    }
-  }
-
-  public IExpression getExpression() {
-    return expression;
-  }
-
-  public void setExpression(IExpression expression) {
-    this.expression = expression;
-  }
-
   @Override
-  public List<Path> getPaths() {
+  public List<PartialPath> getPaths() {
     return paths;
   }
 
-  public void setPaths(List<Path> paths) {
+  public void setPaths(List<PartialPath> paths) {
     this.paths = paths;
   }
 
@@ -95,22 +63,6 @@ public class QueryPlan extends PhysicalPlan {
 
   public void setDataTypes(List<TSDataType> dataTypes) {
     this.dataTypes = dataTypes;
-  }
-
-  public List<Path> getDeduplicatedPaths() {
-    return deduplicatedPaths;
-  }
-
-  public void addDeduplicatedPaths(Path path) {
-    this.deduplicatedPaths.add(path);
-  }
-
-  public List<TSDataType> getDeduplicatedDataTypes() {
-    return deduplicatedDataTypes;
-  }
-
-  public void addDeduplicatedDataTypes(TSDataType dataType) {
-    this.deduplicatedDataTypes.add(dataType);
   }
 
   public int getRowLimit() {
@@ -133,64 +85,27 @@ public class QueryPlan extends PhysicalPlan {
     return rowLimit > 0;
   }
 
-  public boolean isGroupByDevice() {
-    return isGroupByDevice;
+  public boolean isAlignByTime() {
+    return alignByTime;
   }
 
-  public void setGroupByDevice(boolean groupByDevice) {
-    isGroupByDevice = groupByDevice;
+  public void setAlignByTime(boolean align) {
+    alignByTime = align;
   }
 
-  public void setMeasurements(List<String> measurements) {
-    this.measurements = measurements;
+  public void addPathToIndex(String columnName, Integer index) {
+    pathToIndex.put(columnName, index);
   }
 
-  public List<String> getMeasurements() {
-    return measurements;
+  public Map<String, Integer> getPathToIndex() {
+    return pathToIndex;
   }
 
-  public void setMeasurementsGroupByDevice(
-      Map<String, Set<String>> measurementsGroupByDevice) {
-    this.measurementsGroupByDevice = measurementsGroupByDevice;
+  public boolean isAscending() {
+    return ascending;
   }
 
-  public Map<String, Set<String>> getMeasurementsGroupByDevice() {
-    return measurementsGroupByDevice;
+  public void setAscending(boolean ascending) {
+    this.ascending = ascending;
   }
-
-  public void setDataTypeConsistencyChecker(
-      Map<String, TSDataType> dataTypeConsistencyChecker) {
-    this.dataTypeConsistencyChecker = dataTypeConsistencyChecker;
-  }
-
-  public Map<String, TSDataType> getDataTypeConsistencyChecker() {
-    return dataTypeConsistencyChecker;
-  }
-
-  public Map<Path, TSDataType> getDataTypeMapping() {
-    return dataTypeMapping;
-  }
-
-  public void addTypeMapping(Path path, TSDataType dataType) {
-    dataTypeMapping.put(path, dataType);
-  }
-
-  public void setDeduplicatedPaths(
-      List<Path> deduplicatedPaths) {
-    this.deduplicatedPaths = deduplicatedPaths;
-  }
-
-  public void setDeduplicatedDataTypes(
-      List<TSDataType> deduplicatedDataTypes) {
-    this.deduplicatedDataTypes = deduplicatedDataTypes;
-  }
-
-  public Map<String, IExpression> getDeviceToFilterMap() {
-    return deviceToFilterMap;
-  }
-
-  public void setDeviceToFilterMap(Map<String, IExpression> deviceToFilterMap) {
-    this.deviceToFilterMap = deviceToFilterMap;
-  }
-
 }

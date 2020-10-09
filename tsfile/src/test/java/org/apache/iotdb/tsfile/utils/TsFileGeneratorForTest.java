@@ -25,34 +25,28 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.Scanner;
 
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
-import org.apache.iotdb.tsfile.common.conf.TSFileConfig;
+import org.junit.Assert;
+import org.junit.Ignore;
 import org.apache.iotdb.tsfile.common.conf.TSFileDescriptor;
-import org.apache.iotdb.tsfile.common.constant.JsonFormatConstant;
-import org.apache.iotdb.tsfile.constant.TestConstant;
-import org.apache.iotdb.tsfile.encoding.encoder.Encoder;
 import org.apache.iotdb.tsfile.exception.write.WriteProcessException;
 import org.apache.iotdb.tsfile.file.header.ChunkHeader;
 import org.apache.iotdb.tsfile.file.metadata.enums.CompressionType;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSEncoding;
-import org.apache.iotdb.tsfile.fileSystem.fsFactory.FSFactory;
 import org.apache.iotdb.tsfile.fileSystem.FSFactoryProducer;
+import org.apache.iotdb.tsfile.fileSystem.fsFactory.FSFactory;
+import org.apache.iotdb.tsfile.read.common.Path;
 import org.apache.iotdb.tsfile.write.TsFileWriter;
 import org.apache.iotdb.tsfile.write.record.TSRecord;
 import org.apache.iotdb.tsfile.write.schema.Schema;
-import org.apache.iotdb.tsfile.write.schema.SchemaBuilder;
-import org.junit.Assert;
-import org.junit.Ignore;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
+import org.apache.iotdb.tsfile.constant.TestConstant;
+import org.apache.iotdb.tsfile.encoding.encoder.Encoder;
 
 @Ignore
 public class TsFileGeneratorForTest {
 
   public static final long START_TIMESTAMP = 1480562618000L;
-  private static final Logger LOG = LoggerFactory.getLogger(TsFileGeneratorForTest.class);
   private static String inputDataFile;
   public static String outputDataFile = TestConstant.BASE_OUTPUT_PATH.concat("testTsFile.tsfile");
   private static String errorOutputDataFile;
@@ -61,12 +55,11 @@ public class TsFileGeneratorForTest {
   private static int pageSize;
   private static FSFactory fsFactory = FSFactoryProducer.getFSFactory();
 
-  public static void generateFile(int rowCount, int chunkGroupSize, int pageSize)
-      throws IOException {
+  public static void generateFile(int rowCount, int chunkGroupSize, int pageSize) throws IOException {
     generateFile(rowCount, rowCount, chunkGroupSize, pageSize);
   }
 
-  public static void generateFile(int minRowCount, int maxRowCount,int chunkGroupSize, int pageSize)
+  public static void generateFile(int minRowCount, int maxRowCount, int chunkGroupSize, int pageSize)
       throws IOException {
     TsFileGeneratorForTest.rowCount = maxRowCount;
     TsFileGeneratorForTest.chunkGroupSize = chunkGroupSize;
@@ -105,48 +98,49 @@ public class TsFileGeneratorForTest {
     FileWriter fw = new FileWriter(file);
 
     long startTime = START_TIMESTAMP;
-    for (int i = 0; i < maxRowCount; i++) {
-      // write d1
-      String d1 = "d1," + (startTime + i) + ",s1," + (i * 10 + 1) + ",s2," + (i * 10 + 2);
-      if (i % 5 == 0) {
-        d1 += ",s3," + (i * 10 + 3);
-      }
-      if (i % 8 == 0) {
-        d1 += ",s4," + "dog" + i;
-      }
-      if (i % 9 == 0) {
-        d1 += ",s5," + "false";
-      }
-      if (i % 10 == 0 && i < minRowCount) {
-        d1 += ",s6," + ((int) (i / 9.0) * 100) / 100.0;
-      }
-      if (i % 11 == 0) {
-        d1 += ",s7," + ((int) (i / 10.0) * 100) / 100.0;
-      }
-      fw.write(d1 + "\r\n");
+    try {
+      for (int i = 0; i < maxRowCount; i++) {
+        // write d1
+        String d1 = "d1," + (startTime + i) + ",s1," + (i * 10 + 1) + ",s2," + (i * 10 + 2);
+        if (i % 5 == 0) {
+          d1 += ",s3," + (i * 10 + 3);
+        }
+        if (i % 8 == 0) {
+          d1 += ",s4," + "dog" + i;
+        }
+        if (i % 9 == 0) {
+          d1 += ",s5," + "false";
+        }
+        if (i % 10 == 0 && i < minRowCount) {
+          d1 += ",s6," + ((int) (i / 9.0) * 100) / 100.0;
+        }
+        if (i % 11 == 0) {
+          d1 += ",s7," + ((int) (i / 10.0) * 100) / 100.0;
+        }
+        fw.write(d1 + "\r\n");
 
-      // write d2
-      String d2 = "d2," + (startTime + i) + ",s2," + (i * 10 + 2) + ",s3," + (i * 10 + 3);
-      if (i % 20 < 5) {
-        // LOG.info("write null to d2:" + (startTime + i));
-        d2 = "d2," + (startTime + i) + ",s2,,s3," + (i * 10 + 3);
+        // write d2
+        String d2 = "d2," + (startTime + i) + ",s2," + (i * 10 + 2) + ",s3," + (i * 10 + 3);
+        if (i % 20 < 5) {
+          // LOG.info("write null to d2:" + (startTime + i));
+          d2 = "d2," + (startTime + i) + ",s2,,s3," + (i * 10 + 3);
+        }
+        if (i % 5 == 0) {
+          d2 += ",s1," + (i * 10 + 1);
+        }
+        if (i % 8 == 0) {
+          d2 += ",s4," + "dog" + i % 4;
+        }
+        fw.write(d2 + "\r\n");
       }
-      if (i % 5 == 0) {
-        d2 += ",s1," + (i * 10 + 1);
-      }
-      if (i % 8 == 0) {
-        d2 += ",s4," + "dog" + i % 4;
-      }
-      fw.write(d2 + "\r\n");
+      // write error
+      String d = "d2,3," + (startTime + rowCount) + ",s2," + (rowCount * 10 + 2) + ",s3," + (rowCount * 10 + 3);
+      fw.write(d + "\r\n");
+      d = "d2," + (startTime + rowCount + 1) + ",2,s-1," + (rowCount * 10 + 2);
+      fw.write(d + "\r\n");
+    } finally {
+      fw.close();
     }
-    // write error
-    String d =
-        "d2,3," + (startTime + rowCount) + ",s2," + (rowCount * 10 + 2) + ",s3," + (rowCount * 10
-            + 3);
-    fw.write(d + "\r\n");
-    d = "d2," + (startTime + rowCount + 1) + ",2,s-1," + (rowCount * 10 + 2);
-    fw.write(d + "\r\n");
-    fw.close();
   }
 
   static public void write() throws IOException {
@@ -163,12 +157,11 @@ public class TsFileGeneratorForTest {
 
     TSFileDescriptor.getInstance().getConfig().setGroupSizeInByte(chunkGroupSize);
     TSFileDescriptor.getInstance().getConfig().setMaxNumberOfPointsInPage(pageSize);
-    TsFileWriter innerWriter = new TsFileWriter(file, schema,
-        TSFileDescriptor.getInstance().getConfig());
 
     // write
-    try (Scanner in = new Scanner(fsFactory.getFile(inputDataFile))) {
-      assert in != null;
+    try (TsFileWriter innerWriter = new TsFileWriter(file, schema,
+        TSFileDescriptor.getInstance().getConfig());
+        Scanner in = new Scanner(fsFactory.getFile(inputDataFile))) {
       while (in.hasNextLine()) {
         String str = in.nextLine();
         TSRecord record = RecordUtils.parseSimpleTupleRecord(str, schema);
@@ -176,88 +169,45 @@ public class TsFileGeneratorForTest {
       }
     } catch (WriteProcessException e) {
       e.printStackTrace();
-    } finally {
-      innerWriter.close();
     }
   }
 
-  private static JSONObject generateTestData() {
-    TSFileConfig conf = TSFileDescriptor.getInstance().getConfig();
-    JSONObject s1 = new JSONObject();
-    s1.put(JsonFormatConstant.MEASUREMENT_UID, "s1");
-    s1.put(JsonFormatConstant.DATA_TYPE, TSDataType.INT32.toString());
-    s1.put(JsonFormatConstant.MEASUREMENT_ENCODING, conf.getValueEncoder());
-    JSONObject s2 = new JSONObject();
-    s2.put(JsonFormatConstant.MEASUREMENT_UID, "s2");
-    s2.put(JsonFormatConstant.DATA_TYPE, TSDataType.INT64.toString());
-    s2.put(JsonFormatConstant.MEASUREMENT_ENCODING, conf.getValueEncoder());
-    JSONObject s3 = new JSONObject();
-    s3.put(JsonFormatConstant.MEASUREMENT_UID, "s3");
-    s3.put(JsonFormatConstant.DATA_TYPE, TSDataType.INT64.toString());
-    s3.put(JsonFormatConstant.MEASUREMENT_ENCODING, conf.getValueEncoder());
-    JSONObject s4 = new JSONObject();
-    s4.put(JsonFormatConstant.MEASUREMENT_UID, "s4");
-    s4.put(JsonFormatConstant.DATA_TYPE, TSDataType.TEXT.toString());
-    s4.put(JsonFormatConstant.MEASUREMENT_ENCODING, TSEncoding.PLAIN.toString());
-    JSONObject s5 = new JSONObject();
-    s5.put(JsonFormatConstant.MEASUREMENT_UID, "s5");
-    s5.put(JsonFormatConstant.DATA_TYPE, TSDataType.BOOLEAN.toString());
-    s5.put(JsonFormatConstant.MEASUREMENT_ENCODING, TSEncoding.PLAIN.toString());
-    JSONObject s6 = new JSONObject();
-    s6.put(JsonFormatConstant.MEASUREMENT_UID, "s6");
-    s6.put(JsonFormatConstant.DATA_TYPE, TSDataType.FLOAT.toString());
-    s6.put(JsonFormatConstant.MEASUREMENT_ENCODING, TSEncoding.RLE.toString());
-    JSONObject s7 = new JSONObject();
-    s7.put(JsonFormatConstant.MEASUREMENT_UID, "s7");
-    s7.put(JsonFormatConstant.DATA_TYPE, TSDataType.DOUBLE.toString());
-    s7.put(JsonFormatConstant.MEASUREMENT_ENCODING, TSEncoding.RLE.toString());
-
-    JSONArray measureGroup1 = new JSONArray();
-    measureGroup1.add(s1);
-    measureGroup1.add(s2);
-    measureGroup1.add(s3);
-    measureGroup1.add(s4);
-    measureGroup1.add(s5);
-    measureGroup1.add(s6);
-    measureGroup1.add(s7);
-
-    JSONObject jsonSchema = new JSONObject();
-    jsonSchema.put(JsonFormatConstant.DELTA_TYPE, "test_type");
-    jsonSchema.put(JsonFormatConstant.JSON_SCHEMA, measureGroup1);
-    return jsonSchema;
-  }
-
   private static Schema generateTestSchema() {
-    SchemaBuilder schemaBuilder = new SchemaBuilder();
-    schemaBuilder.addSeries("s1", TSDataType.INT32, TSEncoding.RLE);
-    schemaBuilder.addSeries("s2", TSDataType.INT64, TSEncoding.PLAIN);
-    schemaBuilder.addSeries("s3", TSDataType.INT64, TSEncoding.TS_2DIFF);
-    schemaBuilder.addSeries("s4", TSDataType.TEXT, TSEncoding.PLAIN, CompressionType.UNCOMPRESSED,
-        Collections.singletonMap(Encoder.MAX_STRING_LENGTH, "20"));
-    schemaBuilder.addSeries("s5", TSDataType.BOOLEAN, TSEncoding.RLE);
-    schemaBuilder.addSeries("s6", TSDataType.FLOAT, TSEncoding.RLE, CompressionType.SNAPPY,
-        Collections.singletonMap(Encoder.MAX_POINT_NUMBER, "5"));
-    schemaBuilder.addSeries("s7", TSDataType.DOUBLE, TSEncoding.GORILLA);
-    return schemaBuilder.build();
-  }
+    Schema schema = new Schema();
+    schema.registerTimeseries(new Path("d1", "s1"), new MeasurementSchema("s1", TSDataType.INT32, TSEncoding.RLE));
+    schema.registerTimeseries(new Path("d1", "s2"), new MeasurementSchema("s2", TSDataType.INT64, TSEncoding.PLAIN));
+    schema.registerTimeseries(new Path("d1", "s3"), new MeasurementSchema("s3", TSDataType.INT64, TSEncoding.TS_2DIFF));
+    schema.registerTimeseries(new Path("d1", "s4"), new MeasurementSchema("s4", TSDataType.TEXT, TSEncoding.PLAIN,
+        CompressionType.UNCOMPRESSED, Collections.singletonMap(Encoder.MAX_STRING_LENGTH, "20")));
+    schema.registerTimeseries(new Path("d1", "s5"), new MeasurementSchema("s5", TSDataType.BOOLEAN, TSEncoding.RLE));
+    schema.registerTimeseries(new Path("d1", "s6"), new MeasurementSchema("s6", TSDataType.FLOAT, TSEncoding.RLE,
+        CompressionType.SNAPPY, Collections.singletonMap(Encoder.MAX_POINT_NUMBER, "5")));
+    schema.registerTimeseries(new Path("d1", "s7"), new MeasurementSchema("s7", TSDataType.DOUBLE, TSEncoding.GORILLA));
 
+    schema.registerTimeseries(new Path("d2", "s1"), new MeasurementSchema("s1", TSDataType.INT32, TSEncoding.RLE));
+    schema.registerTimeseries(new Path("d2", "s2"), new MeasurementSchema("s2", TSDataType.INT64, TSEncoding.PLAIN));
+    schema.registerTimeseries(new Path("d2", "s3"), new MeasurementSchema("s3", TSDataType.INT64, TSEncoding.TS_2DIFF));
+    schema.registerTimeseries(new Path("d2", "s4"), new MeasurementSchema("s4", TSDataType.TEXT, TSEncoding.PLAIN,
+        CompressionType.UNCOMPRESSED, Collections.singletonMap(Encoder.MAX_STRING_LENGTH, "20")));
+    return schema;
+  }
 
   /**
    * Writes a File with one incomplete chunk header
+   * 
    * @param file File to write
    * @throws IOException is thrown when encountering IO issues
    */
   public static void writeFileWithOneIncompleteChunkHeader(File file) throws IOException {
-      TsFileWriter writer = new TsFileWriter(file);
+    TsFileWriter writer = new TsFileWriter(file);
 
-      ChunkHeader header = new ChunkHeader("s1", 100, TSDataType.FLOAT, CompressionType.SNAPPY,
-              TSEncoding.PLAIN, 5);
-      ByteBuffer buffer = ByteBuffer.allocate(header.getSerializedSize());
-      header.serializeTo(buffer);
-      buffer.flip();
-      byte[] data = new byte[3];
-      buffer.get(data, 0, 3);
-      writer.getIOWriter().getIOWriterOut().write(data);
-      writer.getIOWriter().close();
+    ChunkHeader header = new ChunkHeader("s1", 100, TSDataType.FLOAT, CompressionType.SNAPPY, TSEncoding.PLAIN, 5);
+    ByteBuffer buffer = ByteBuffer.allocate(header.getSerializedSize());
+    header.serializeTo(buffer);
+    buffer.flip();
+    byte[] data = new byte[3];
+    buffer.get(data, 0, 3);
+    writer.getIOWriter().getIOWriterOut().write(data);
+    writer.getIOWriter().close();
   }
 }
